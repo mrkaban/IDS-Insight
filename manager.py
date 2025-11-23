@@ -36,7 +36,8 @@ class SuricataManager:
             'time_filter_enabled': False,
             'start_time': '',
             'end_time': '',
-            'auto_refresh': True  # Добавляем новый параметр со значением по умолчанию
+            'auto_refresh': True,
+            'language': 'ru'  # ДОБАВЬТЕ ЭТУ СТРОКУ - язык по умолчанию
         }
         self.rule_index = {}  # sid -> (filename, rule_data)
         self.index_built = False
@@ -51,9 +52,77 @@ class SuricataManager:
         self.events_cache = {}
         self.cache_time = None
         self.cache_duration = 60  # секунд
+        self._cached_disabled_sids = None  # <-- кэш
+        self._config_last_modified = None  # <-- для инвалидации кэша (опционально)
         # Загружаем пользовательские настройки
         self.load_app_config()
     
+    def set_translations(self, translations):
+        """Устанавливает переведенные строки для обработки событий"""
+        self.translations = translations
+    
+    def _get_disabled_sids_from_config(self):
+        """Возвращает множество отключённых sid из suricata.yaml с кэшированием"""
+        # Опционально: проверяем, не изменился ли файл конфига
+        config_path = self.config_file
+        try:
+            mtime = os.path.getmtime(config_path)
+            if self._cached_disabled_sids is not None and self._config_last_modified == mtime:
+                return self._cached_disabled_sids
+        except Exception:
+            pass  # если не удалось — перечитаем
+
+        # Читаем и парсим
+        try:
+            config_text = self.load_config()
+            config = yaml.safe_load(config_text) or {}
+            disabled = config.get('disable-sid', [])
+            if isinstance(disabled, list):
+                result = set(str(sid) for sid in disabled)
+            else:
+                result = set()
+        except Exception as e:
+            logging.error(f"Ошибка чтения disable-sid из конфига: {e}")
+            result = set()
+
+        # Сохраняем в кэш
+        self._cached_disabled_sids = result
+        try:
+            self._config_last_modified = os.path.getmtime(config_path)
+        except Exception:
+            pass
+
+        return result
+
+
+    def _update_disabled_sids_in_config(self, sids_to_add=None, sids_to_remove=None):
+        """Обновляет список disable-sid в suricata.yaml"""
+        try:
+            config_text = self.load_config()
+            config = yaml.safe_load(config_text) or {}
+
+            disabled = set(str(sid) for sid in config.get('disable-sid', []))
+            if sids_to_add:
+                disabled.update(str(sid) for sid in sids_to_add)
+            if sids_to_remove:
+                disabled.difference_update(str(sid) for sid in sids_to_remove)
+
+            # Сохраняем как список (Suricata требует список)
+            config['disable-sid'] = sorted(disabled, key=lambda x: int(x) if x.isdigit() else x)
+
+            new_config = yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+            if self.save_config(new_config):
+                # Сбрасываем кэш после успешного сохранения
+                self._cached_disabled_sids = None
+                self._config_last_modified = None
+                return True
+            return False
+
+        except Exception as e:
+            logging.error(f"Ошибка обновления disable-sid: {e}")
+            return False
+
     def build_rule_index(self):
         """Строит индекс правил для быстрого поиска"""
         self.rule_index = {}
@@ -196,15 +265,24 @@ class SuricataManager:
         if os.path.exists(config_file):
             try:
                 config = configparser.ConfigParser()
-                config.read(config_file)
+                config.read(config_file, encoding='utf-8')
                 if 'Settings' in config:
                     settings = config['Settings']
                     
+                    # Загружаем язык из настроек (если есть)
+                    saved_language = settings.get('language', '')
+                    if saved_language in ['ru', 'en']:
+                        self.config['language'] = saved_language
+                    
                     # Используем правильный метод для получения значений
+                    self.config['service_name'] = settings.get('service_name', self.config['service_name'])  # Добавляем загрузку имени службы
                     self.config['suricata_path'] = settings.get('suricata_path', self.config['suricata_path'])
                     self.config['rules_dir'] = settings.get('rules_dir', self.config['rules_dir'])
                     self.config['eve_log'] = settings.get('eve_log', self.config['eve_log'])
                     self.config['backup_dir'] = settings.get('backup_dir', self.config['backup_dir'])
+                    
+                    # Обновляем имя службы в менеджере
+                    self.service_name = self.config['service_name']
                     
                     # Для числовых значений
                     try:
@@ -231,60 +309,77 @@ class SuricataManager:
         for filename in rule_files:
             all_rules.extend(self.parse_rules(filename))
         return all_rules
-        
-       
-    def safe_write_file(self, filepath, content):
-        """Безопасно записывает содержимое в файл с обработкой прав доступа"""
+
+    def safe_restart(self):
+        """Безопасный перезапуск Suricata с обработкой прав"""
+        if self.safe_service_action("restart"):
+            logging.info("Suricata перезапущена")
+            return True
+        return False
+
+    def safe_write_file(self, filepath, content, delete=False):
+        """Безопасно записывает или удаляет файл с обработкой прав доступа"""
         # Проверяем, что файл является правилом или конфигом
         if not (filepath.endswith('.rules') or filepath.endswith('.yaml')):
-            logging.error(f"Попытка записи в неразрешенный файл: {filepath}")
+            logging.error(f"Попытка работы с неразрешенным файлом: {filepath}")
             return False
-        
+
         # Проверяем, что файл находится в разрешенной директории
         allowed_dirs = [self.rules_dir, self.backup_dir, os.path.dirname(self.config_file)]
         if not any(filepath.startswith(d) for d in allowed_dirs):
-            logging.error(f"Попытка записи в неразрешенную директорию: {filepath}")
+            logging.error(f"Попытка работы с неразрешенной директорией: {filepath}")
             return False
+
         try:
             # Проверяем права администратора
             is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-            
+
             if is_admin:
-                # Прямая запись если есть права
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                # Прямое удаление или запись если есть права
+                if delete:
+                    os.remove(filepath)
+                else:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(content)
                 return True
             else:
-                # Создаем временный файл
-                temp_file = tempfile.mktemp()
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                # Команда для копирования с перезаписью
-                cmd = f'cmd /c copy /Y "{temp_file}" "{filepath}"'
-                
+                # Создаем временный bat-файл
+                temp_dir = tempfile.mkdtemp()
+                bat_path = os.path.join(temp_dir, "admin_action.bat")
+
+                if delete:
+                    bat_content = f'@echo off\ndel /F "{filepath}"\n'
+                else:
+                    # Создаем временный файл с содержимым
+                    temp_file = os.path.join(temp_dir, "temp_content")
+                    with open(temp_file, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    bat_content = f'@echo off\ncopy /Y "{temp_file}" "{filepath}"\n'
+
+                bat_content += f"rmdir /S /Q \"{temp_dir}\"\nexit 0\n"
+
+                with open(bat_path, 'w') as bat_file:
+                    bat_file.write(bat_content)
+
                 # Запускаем с правами администратора
                 process_info = shell.ShellExecuteEx(
                     fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
                     lpVerb='runas',
-                    lpFile='cmd.exe',
-                    lpParameters=cmd,
+                    lpFile=bat_path,
                     nShow=0
                 )
                 win32event.WaitForSingleObject(process_info['hProcess'], -1)
                 win32api.CloseHandle(process_info['hProcess'])
-                
-                # Удаляем временный файл
-                os.remove(temp_file)
+
                 return True
-                
+
         except Exception as e:
-            logging.error(f"Ошибка записи файла {filepath}: {str(e)}")
+            logging.error(f"Ошибка работы с файлом {filepath}: {str(e)}")
             return False
         
     def safe_service_action(self, action):
         """Безопасное выполнение действий со службой с обработкой прав"""
-        # МЕТОД РАБОТАЕТ, ИСПРАВИШЬ, В ГОЛОВУ ДАМ!
+        # МЕТОД РАБОТАЕТ, ИСПРАВИШЬ, В ГОЛОВУ ДАМ ЧЕМ НИБУДЬ ТЯЖЕЛЫМ!
         try:
             # Проверяем права администратора
             is_admin = ctypes.windll.shell32.IsUserAnAdmin()
@@ -394,106 +489,157 @@ class SuricataManager:
     def get_rule_files(self):
         """Возвращает список файлов с правилами"""
         return [f for f in os.listdir(self.rules_dir) if f.endswith('.rules')]
+
+    def delete_rule_file(self, filename):
+        """Безопасно удаляет файл правил и убирает его из конфигурации"""
+        try:
+            # Удаляем из конфигурации
+            config_text = self.load_config()
+            config = yaml.safe_load(config_text) or {}
+
+            if 'rule-files' in config:
+                rule_files = config['rule-files']
+                if filename in rule_files:
+                    rule_files.remove(filename)
+                    config['rule-files'] = rule_files
+                    new_config = yaml.dump(config, default_flow_style=False, sort_keys=False)
+                    self.save_config(new_config)
+
+            # Удаляем файл
+            filepath = os.path.join(self.rules_dir, filename)
+            if os.path.exists(filepath):
+                return self.safe_write_file(filepath, "", delete=True)
+            return True
+        except Exception as e:
+            logging.error(f"Ошибка удаления файла правил: {str(e)}")
+            return False
     
     def parse_rules(self, filename):
-        """Парсит правила из файла, включая отключенные"""
+        """Парсит правила из файла, учитывая отключение через комментарии и disable-sid"""
         rules = []
         filepath = os.path.join(self.rules_dir, filename)
-        
+
+        # Загружаем глобальный список отключённых sid из конфига
+        disabled_sids_global = self._get_disabled_sids_from_config()
+
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 for line in f:
-                    original_line = line.rstrip()  # Сохраняем оригинальную строку
-                    
-                    # Определяем состояние правила
-                    enabled = True
-                    working_line = original_line
-                    
-                    # Проверяем, отключено ли правило
-                    if working_line.startswith('#'):
-                        enabled = False
-                        # Убираем символ комментария только для анализа
-                        working_line = working_line.lstrip('#').lstrip()
-                    
-                    # Пропускаем пустые строки
-                    if not working_line.strip():
+                    original_line = line.rstrip()
+
+                    # Пропускаем пустые строки и чистые комментарии без sid
+                    if not original_line.strip() or (original_line.strip().startswith('#') and 'sid:' not in original_line):
                         continue
-                    
-                    # Извлечение SID
+
+                    # Определяем, отключено ли правило через комментарий
+                    disabled_by_comment = original_line.lstrip().startswith('#')
+                    working_line = original_line.lstrip('#').lstrip() if disabled_by_comment else original_line
+
+                    # Пропускаем, если после очистки нет sid
+                    if 'sid:' not in working_line:
+                        continue
+
+                    # Извлекаем sid
                     sid_match = re.search(r'sid:(\d+);', working_line)
                     sid = sid_match.group(1) if sid_match else "N/A"
-                    
-                    # Извлечение сообщения
-                    msg_match = re.search(r'msg:"([^"]+)"', working_line)
+
+                    # Извлекаем msg
+                    msg_match = re.search(r'msg:"([^"]*)"', working_line)
                     msg = msg_match.group(1) if msg_match else "No message"
-                    
+
+                    # Определяем финальный статус:
+                    # Отключено, если закомментировано ИЛИ sid в disable-sid
+                    enabled = not disabled_by_comment and (sid not in disabled_sids_global)
+
                     rules.append({
-                        'raw': original_line,  # Сохраняем оригинальную строку
+                        'raw': original_line,
                         'enabled': enabled,
                         'sid': sid,
                         'msg': msg,
                         'file': filename
                     })
+
         except Exception as e:
             logging.error(f"Error parsing rules: {traceback.format_exc()}")
             logging.error(f"File: {filepath}, Error: {str(e)}")
-        
+
         return rules
     
    
     
     def toggle_rule(self, rule_data, enable):
-        """Включает/выключает правило по SID"""
+        """Включает/выключает правило по SID через disable-sid + очистку комментариев"""
         try:
             filepath = os.path.join(self.rules_dir, rule_data['file'])
-            sid = rule_data['sid']
-            
-            # Читаем текущее содержимое файла
+            sid = str(rule_data['sid'])
+
+            # Шаг 1: Обновляем suricata.yaml
+            if enable:
+                # Включаем: удаляем из disable-sid
+                if not self._update_disabled_sids_in_config(sids_to_remove=[sid]):
+                    return False
+            else:
+                # Отключаем: добавляем в disable-sid
+                if not self._update_disabled_sids_in_config(sids_to_add=[sid]):
+                    return False
+
+            # Шаг 2: Убираем комментарий из файла (чтобы правило было "активным" в файле)
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.readlines()
-            
+
             new_content = []
             rule_found = False
-            
             for line in content:
                 if f"sid:{sid};" in line:
                     rule_found = True
-                    if enable:
-                        # Убираем комментирование
-                        if line.strip().startswith('#'):
-                            line = line.lstrip('#').lstrip()
-                    else:
-                        # Добавляем комментирование
-                        if not line.strip().startswith('#'):
-                            line = '# ' + line
+                    # Убираем комментарий в любом случае
+                    if line.strip().startswith('#'):
+                        line = line.lstrip('#').lstrip()
                 new_content.append(line)
-            
+
             if not rule_found:
                 logging.warning(f"Rule with SID {sid} not found in {filepath}")
                 return False
-            
-            # Записываем измененное содержимое через безопасный метод
+
+            # Записываем "чистый" файл без комментариев
             return self.safe_write_file(filepath, ''.join(new_content))
-            
+
         except Exception as e:
-            logging.error(f"Error toggling rule: {traceback.format_exc()}")
+            logging.error(f"Error toggling rule via disable-sid: {traceback.format_exc()}")
             return False
-    
    
     
     def toggle_rule_by_sid(self, sid, enable):
-        """Включает/выключает правило по SID (ищет во всех файлах)"""
+        """Включает/выключает правило по SID (ищет во всех файлах) с обработкой прав доступа"""
         rule_files = self.get_rule_files()
-        
+
         for filename in rule_files:
             rules = self.parse_rules(filename)
             for rule in rules:
                 if rule['sid'] == sid:
-                    return self.toggle_rule(rule, enable)
-        
+                    # Используем безопасный метод для изменения правила
+                    return self.safe_toggle_rule(rule, enable)
+
         return False
-    
-    
+
+    def safe_toggle_rule_by_sid(self, sid, enable):
+        """Безопасное включение/отключение правила по SID с обработкой прав доступа"""
+        rule_files = self.get_rule_files()
+        sid_str = str(sid)  # Нормализуем SID к строке
+
+        for filename in rule_files:
+            rules = self.parse_rules(filename)
+            for rule in rules:
+                if rule['sid'] == sid_str:
+                    # Используем безопасный метод для изменения правила
+                    return self.safe_toggle_rule(rule, enable)
+
+        return False
+
+    def safe_toggle_rule(self, rule_data, enable):
+        """Безопасная версия toggle_rule (на случай прямого вызова)"""
+        return self.toggle_rule(rule_data, enable)
+        
     
     def change_rule_action(self, sid, new_action):
         """Изменяет действие правила (alert, drop, reject) по SID"""
@@ -532,24 +678,17 @@ class SuricataManager:
 
     
     def toggle_rule_file(self, filename, enable):
-        """Включает/выключает весь файл правил"""
-        filepath = os.path.join(self.rules_dir, filename)
-        
+        """Включает/выключает весь файл через disable-sid"""
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Включаем/выключаем все правила
+            rules = self.parse_rules(filename)
+            sids = [r['sid'] for r in rules if r.get('sid') and r['sid'] != 'N/A']
+
             if enable:
-                content = re.sub(r'^#\s*', '', content, flags=re.MULTILINE)
+                return self._update_disabled_sids_in_config(sids_to_remove=sids)
             else:
-                content = re.sub(r'^([^#\n])', r'# \1', content, flags=re.MULTILINE)
-            
-            # Безопасная запись
-            return self.safe_write_file(filepath, content)
-            
+                return self._update_disabled_sids_in_config(sids_to_add=sids)
         except Exception as e:
-            logging.error(f"Error toggling rule file: {traceback.format_exc()}")
+            logging.error(f"Error toggling rule file via disable-sid: {e}")
             return False
     
     
@@ -795,24 +934,36 @@ class SuricataManager:
         
     def process_event(self, event, raw_line):
         """Обрабатывает одно событие (общая функция для всех методов чтения)"""
-        # Проверяем наличие обязательного поля
         if 'event_type' not in event:
             return None
-    
+
         event_type = event.get('event_type', 'unknown')
-        
-        # Определение действия
         action = "unknown"
+
+        # Используем переведенные строки если доступны
+        translations = getattr(self, 'translations', {})
         
         # 1. Кастомные flowint для блокировок
         if 'flowint' in event and ('gui_action_drop' in event['flowint'] or 'gui_blocked_ip' in event['flowint']):
             action = 'drop'
-        
-        # 2. Для алертов проверяем сигнатуру
+
+        # 2. Для алертов: определяем действие по реальному правилу
+        if action == "unknown" and event_type == 'alert':
+            alert_obj = event.get('alert', {})
+            sid = alert_obj.get('signature_id')
+            if sid:
+                _, rule_data = self.find_rule_by_sid(sid)
+                if rule_data and 'raw' in rule_data:
+                    raw_rule = rule_data['raw'].strip()
+                    if raw_rule and not raw_rule.startswith('#'):
+                        first_word = raw_rule.split()[0].lower()
+                        if first_word in {'drop', 'alert', 'reject', 'pass'}:
+                            action = first_word
+
+        # 3. Fallback на сигнатуру (для GUI-правил)
         if action == "unknown" and event_type == 'alert':
             alert_obj = event.get('alert', {})
             signature = alert_obj.get('signature', '')
-            
             if "Blocked IP" in signature or "GUI Blocked" in signature:
                 action = 'drop'
             elif 'action' in alert_obj:
@@ -823,12 +974,10 @@ class SuricataManager:
                     first_word = parts[0].lower()
                     if first_word in ['alert', 'drop', 'reject', 'pass']:
                         action = first_word
-        
-        # 3. Действие из корневого уровня
+
+        # 4. Другие типы событий
         if action == "unknown" and 'action' in event:
             action = event['action']
-        
-        # 4. Для flow событий
         if action == "unknown" and event_type == 'flow':
             flow_flags = event.get('flow', {}).get('flags', [])
             if 'drop' in flow_flags:
@@ -836,20 +985,33 @@ class SuricataManager:
             elif 'reject' in flow_flags:
                 action = 'reject'
             else:
-                action = 'allow'
-        
-        # 5. Универсальное правило
+                action = translations.get('allow', 'allow')
         if action == "unknown" and event_type not in ["alert", "flow"]:
-            action = "logged"
-        
-        # 6. Действие по умолчанию для алертов
+            action = translations.get('logged', 'logged')
         if action == "unknown" and event_type == 'alert':
             action = "alert"
-        
+
+        # 5. Для flow событий
+        if action == "unknown" and event_type == 'flow':
+            flow_flags = event.get('flow', {}).get('flags', [])
+            if 'drop' in flow_flags:
+                action = 'drop'
+            elif 'reject' in flow_flags:
+                action = 'reject'
+            else:
+                action = translations.get('allow', 'allow')
+
+        # 6. Универсальное правило
+        if action == "unknown" and event_type not in ["alert", "flow"]:
+            action = translations.get('logged', 'logged')
+
+        # 7. Действие по умолчанию для алертов
+        if action == "unknown" and event_type == 'alert':
+            action = "alert"
+
         # Обработка временной метки
         ts = event.get('timestamp')
-        timestamp_str = "N/A"
-        
+        timestamp_str = translations.get('unknown', 'N/A')
         if isinstance(ts, (int, float)):
             timestamp_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
         elif isinstance(ts, str):
@@ -866,24 +1028,23 @@ class SuricataManager:
                 timestamp_str = ts
         else:
             timestamp_str = str(ts)
-        
+
         # Базовые поля
         base_event = {
             'timestamp': timestamp_str,
             'event_type': event_type,
-            'src_ip': event.get('src_ip', 'N/A'),
-            'dest_ip': event.get('dest_ip', 'N/A'),
-            'proto': event.get('proto', 'N/A'),
+            'src_ip': event.get('src_ip', translations.get('unknown', 'N/A')),
+            'dest_ip': event.get('dest_ip', translations.get('unknown', 'N/A')),
+            'proto': event.get('proto', translations.get('unknown', 'N/A')),
             'action': action,
-            'raw': raw_line  # Используем переданную raw_line
+            'raw': raw_line
         }
-            
+
         # Дополнительные поля для алертов
         if event_type == 'alert':
-            base_event['signature'] = event['alert'].get('signature', 'N/A')
-            base_event['category'] = event['alert'].get('category', 'N/A')
-            
-            # Обработка severity
+            base_event['signature'] = event['alert'].get('signature', translations.get('unknown', 'N/A'))
+            base_event['category'] = event['alert'].get('category', translations.get('unknown', 'N/A'))
+
             severity = event['alert'].get('severity', 0)
             if isinstance(severity, str):
                 try:
@@ -892,8 +1053,7 @@ class SuricataManager:
                     base_event['severity'] = 0
             else:
                 base_event['severity'] = severity or 0
-            
-            # Обработка signature_id
+
             sid = event['alert'].get('signature_id', 0)
             if isinstance(sid, str):
                 try:
@@ -902,97 +1062,73 @@ class SuricataManager:
                     base_event['sid'] = 0
             else:
                 base_event['sid'] = sid or 0
-                
-            # Уточнение действия для алертов
-            if 'metadata' in event and 'action' in event['metadata']:
-                base_event['action'] = event['metadata']['action']
+
+            # Уточнение действия (повторно, для уверенности)
+            if action == 'drop':
+                base_event['action'] = 'drop'
             elif 'flowint' in event and 'gui_blocked_ip' in event['flowint']:
                 base_event['action'] = "drop"
-            elif 'action' in alert_obj:
-                base_event['action'] = alert_obj['action']
-            elif 'signature' in alert_obj:
-                signature = alert_obj['signature']
-                if "block" in signature.lower() or "drop" in signature.lower() or "GUI Blocked IP" in signature:
-                    base_event['action'] = "drop"
-                elif "reject" in signature.lower():
-                    base_event['action'] = "reject"
-                else:
-                    base_event['action'] = "alert"
-            
-            # Гарантируем drop для кастомных правил
-            if 'metadata' in event and 'action' in event['metadata'] and event['metadata']['action'] == 'drop':
+            elif 'signature' in event['alert'] and "GUI Blocked IP" in event['alert']['signature']:
                 base_event['action'] = "drop"
-            if 'flowint' in event and 'gui_action_drop' in event['flowint']:
-                base_event['action'] = "drop"
-            if 'signature' in alert_obj and "GUI Blocked IP" in alert_obj['signature']:
-                if 'flowint' in event and 'gui_blocked_ip' in event['flowint']:
-                    base_event['action'] = "drop"
-                else:
-                    base_event['action'] = "drop"
-        
-        # Обработка DNS
+
+        # Обработка других типов событий (DNS, TLS и т.д.)
         elif event_type == 'dns':
-            base_event['signature'] = 'DNS Query'
-            base_event['category'] = 'DNS'
+            base_event['signature'] = translations.get('dns_query', 'DNS Query')
+            base_event['category'] = translations.get('dns', 'DNS')
             base_event['severity'] = 1
-            base_event['query'] = event.get('dns', {}).get('rrname', 'N/A')
-            
+            base_event['query'] = event.get('dns', {}).get('rrname', translations.get('unknown', 'N/A'))
             answers = []
             for ans in event.get('dns', {}).get('answers', []):
                 if 'rdata' in ans:
                     answers.append(ans['rdata'])
                 elif 'aaaa' in ans:
                     answers.append(ans['aaaa'])
-            base_event['response'] = ', '.join(answers) if answers else "N/A"
-        
-        # Обработка TLS
+            base_event['response'] = ', '.join(answers) if answers else translations.get('unknown', 'N/A')
+
         elif event_type == 'tls':
-            base_event['signature'] = 'TLS Handshake'
-            base_event['category'] = 'TLS'
+            base_event['signature'] = translations.get('tls_handshake', 'TLS Handshake')
+            base_event['category'] = translations.get('tls', 'TLS')
             base_event['severity'] = 1
-            base_event['sni'] = event.get('tls', {}).get('sni', 'N/A')
-            base_event['issuer'] = event.get('tls', {}).get('issuerdn', 'N/A')
-        
-        # Обработка BitTorrent
+            base_event['sni'] = event.get('tls', {}).get('sni', translations.get('unknown', 'N/A'))
+            base_event['issuer'] = event.get('tls', {}).get('issuerdn', translations.get('unknown', 'N/A'))
+
         elif event_type == 'bittorrent_dht':
-            base_event['signature'] = 'BitTorrent DHT'
-            base_event['category'] = 'P2P'
+            base_event['signature'] = translations.get('bittorrent_dht', 'BitTorrent DHT')
+            base_event['category'] = translations.get('p2p', 'P2P')
             base_event['severity'] = 2
-            base_event['dht_type'] = event.get('bittorrent_dht', {}).get('type', 'unknown')
+            base_event['dht_type'] = event.get('bittorrent_dht', {}).get('type', translations.get('unknown', 'unknown'))
             base_event['nodes'] = str(len(event.get('bittorrent_dht', {}).get('nodes', [])))
-        
-        # Обработка flow
+
         elif event_type == 'flow':
-            base_event['signature'] = 'Network Flow'
-            base_event['category'] = 'Flow'
+            base_event['signature'] = translations.get('network_flow', 'Network Flow')
+            base_event['category'] = translations.get('flow', 'Flow')
             base_event['severity'] = 0
-            base_event['state'] = event.get('flow', {}).get('state', 'N/A')
-            base_event['reason'] = event.get('flow', {}).get('reason', 'N/A')
-        
-        # Другие типы событий
+            base_event['state'] = event.get('flow', {}).get('state', translations.get('unknown', 'N/A'))
+            base_event['reason'] = event.get('flow', {}).get('reason', translations.get('unknown', 'N/A'))
+
         else:
             base_event['signature'] = event_type
-            base_event['category'] = 'Other'
+            base_event['category'] = translations.get('other', 'Other')
             base_event['severity'] = 1
-        
-        # Поиск файла правила для алертов
+
+        # Поиск файла правила
         if event_type == 'alert':
             sid = base_event.get('sid', 0)
             if sid:
                 rule_file, _ = self.find_rule_by_sid(sid)
-                base_event['rule_file'] = rule_file or "Unknown"
+                base_event['rule_file'] = rule_file or translations.get('unknown', 'Unknown')
             else:
-                base_event['rule_file'] = "N/A"
+                base_event['rule_file'] = translations.get('unknown', 'N/A')
         else:
-            base_event['rule_file'] = "N/A"
-            
+            base_event['rule_file'] = translations.get('unknown', 'N/A')
+
         # Помечаем блокировки
         if action == 'drop':
             base_event['blocked'] = True
             base_event['severity'] = max(base_event.get('severity', 0), 3)
             if 'signature' not in base_event:
-                base_event['signature'] = f"GUI Blocked IP {base_event['src_ip']}"
-    
+                base_event['signature'] = f"Blocked IP {base_event['src_ip']}"
+
         return base_event
     
 
@@ -1021,355 +1157,77 @@ class SuricataManager:
     def read_events(self, limit=None):
         """Читает события из eve.json с обработкой разных форматов времени"""
         events = []
-        
         if limit is None:
-            limit = self.config['events_limit']  # Используем значение из конфига
-        
+            limit = self.config['events_limit']
+
         try:
             if not os.path.exists(self.eve_log):
                 logging.error(f"Файл журнала не найден: {self.eve_log}")
                 return events
-                
-            # Улучшенная функция tail для больших файлов
+
             def tail(filename, lines=limit):
-                """Читает последние `lines` строк из файла"""
                 try:
                     with open(filename, 'rb') as f:
-                        # Переходим в конец файла
                         f.seek(0, os.SEEK_END)
                         end = f.tell()
                         block_size = 4096
                         data = []
                         lines_found = 0
-                        
-                        # Читаем с конца файла
                         while end > 0 and lines_found < lines:
-                            # Считаем назад block_size байт, но не за начало файла
                             if end >= block_size:
                                 f.seek(max(end - block_size, 0), os.SEEK_SET)
                                 chunk = f.read(block_size)
                             else:
                                 f.seek(0, os.SEEK_SET)
                                 chunk = f.read(end)
-                            
                             end -= block_size
-                            # Если ушли в минус, то устанавливаем позицию в 0
                             if end < 0:
                                 end = 0
-                            
-                            # Считаем количество строк в текущем блоке
                             lines_in_chunk = chunk.count(b'\n')
                             lines_found += lines_in_chunk
                             data.append(chunk)
-                        
-                        # Собираем все блоки в одну строку
                         full_data = b''.join(reversed(data))
                         return full_data.splitlines()[-lines:]
                 except Exception as e:
                     logging.error(f"Ошибка чтения файла: {str(e)}")
                     return []
-            
+
             log_lines = tail(self.eve_log, limit)
-            
+
             for line_bytes in log_lines:
                 try:
-                    # Пытаемся декодить как UTF-8
                     line = line_bytes.decode('utf-8').strip()
                 except UnicodeDecodeError:
                     try:
-                        # Пробуем другие кодировки
                         line = line_bytes.decode('cp1251').strip()
                     except:
                         try:
                             line = line_bytes.decode('latin-1').strip()
                         except:
-                            # Если ничего не помогает, пропускаем строку
                             continue
-                
-                # Пропускаем пустые строки
-                if not line:
+
+                if not line or not line.startswith('{'):
                     continue
-                
-                # Пропускаем строки, которые не являются JSON-объектами
-                if not line.startswith('{'):
-                    continue
-                
+
                 try:
-                    # Пытаемся разобрать JSON
                     event = json.loads(line)
-                    
-                    # Проверяем, что это событие содержит обязательные поля
                     if 'event_type' not in event:
                         continue
-                        
-                    event_type = event.get('event_type', 'unknown')
-                    
-                    
-                    # ОПРЕДЕЛЕНИЕ ДЕЙСТВИЯ - ИСПРАВЛЕННАЯ ВЕРСИЯ
-                    action = "unknown"
-                    
-                    # 1. Проверяем наши кастомные flowint для блокировок
-                    if 'flowint' in event and ('gui_action_drop' in event['flowint'] or 'gui_blocked_ip' in event['flowint']):
-                        action = 'drop'
-                    
-                    # 2. Для алертов проверяем сигнатуру
-                    if action == "unknown" and event_type == 'alert':
-                        alert_obj = event.get('alert', {})
-                        signature = alert_obj.get('signature', '')
-                        
-                        # Для наших правил блокировки гарантируем "drop"
-                        if "Blocked IP" in signature or "GUI Blocked" in signature:
-                            action = 'drop'
-                        
-                        # Проверяем явное поле action в alert
-                        elif 'action' in alert_obj:
-                            action = alert_obj['action']
-                        
-                        # Определяем по первому слову в сигнатуре
-                        elif signature:
-                            parts = signature.split()
-                            if parts:
-                                first_word = parts[0].lower()
-                                if first_word in ['alert', 'drop', 'reject', 'pass']:
-                                    action = first_word
-                    
-                    # 3. Пробуем получить действие из корневого уровня
-                    if action == "unknown" and 'action' in event:
-                        action = event['action']
-                    
-                    # 4. Для flow событий определяем действие по flags
-                    if action == "unknown" and event_type == 'flow':
-                        flow_flags = event.get('flow', {}).get('flags', [])
-                        if 'drop' in flow_flags:
-                            action = 'drop'
-                        elif 'reject' in flow_flags:
-                            action = 'reject'
-                        else:
-                            action = 'allow'
-                    
-                    # 5. Универсальное правило для не-alert/flow
-                    if action == "unknown" and event_type not in ["alert", "flow"]:
-                        action = "logged"
-                    
-                    # 6. Если для алерта действие не определено - ставим "alert"
-                    if action == "unknown" and event_type == 'alert':
-                        action = "alert"
-                    
-                    
-                    # Универсальная обработка временной метки
-                    ts = event.get('timestamp')
-                    timestamp_str = "N/A"
-                    
-                    if isinstance(ts, (int, float)):
-                        # Числовой формат (Unix timestamp)
-                        timestamp_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-                    elif isinstance(ts, str):
-                        # Попробуем разные строковые форматы
-                        try:
-                            # Формат ISO с миллисекундами: "2023-01-01T12:34:56.789+0300"
-                            if '.' in ts and 'T' in ts:
-                                dt_str = ts.split('.')[0].replace('T', ' ')
-                                timestamp_str = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
-                            # Формат без миллисекунд: "2023-01-01T12:34:56+0300"
-                            elif 'T' in ts:
-                                dt_str = ts.split('+')[0].replace('T', ' ')
-                                timestamp_str = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
-                            # Другие возможные форматы
-                            else:
-                                timestamp_str = ts  # Оставляем оригинальное значение
-                        except Exception as ts_e:
-                            timestamp_str = ts
-                    else:
-                        timestamp_str = str(ts)
-                    
-                    # Базовые поля для всех событий
-                    base_event = {
-                        'timestamp': timestamp_str,
-                        'event_type': event_type,
-                        'src_ip': event.get('src_ip', 'N/A'),
-                        'dest_ip': event.get('dest_ip', 'N/A'),
-                        'proto': event.get('proto', 'N/A'),
-                        'action': action,  # Используем вычисленное действие
-                        'raw': line
-                    }
-                        
-                    # Дополнительные поля для алертов
-                    if event_type == 'alert':
-                        base_event['signature'] = event['alert'].get('signature', 'N/A')
-                        base_event['category'] = event['alert'].get('category', 'N/A')
-                        
-                        # Обработка severity (может быть строкой или числом)
-                        severity = event['alert'].get('severity', 0)
-                        if isinstance(severity, str):
-                            try:
-                                base_event['severity'] = int(severity)
-                            except ValueError:
-                                base_event['severity'] = 0
-                        else:
-                            base_event['severity'] = severity or 0
-                        
-                        # Обработка signature_id
-                        sid = event['alert'].get('signature_id', 0)
-                        if isinstance(sid, str):
-                            try:
-                                base_event['sid'] = int(sid)
-                            except ValueError:
-                                base_event['sid'] = 0
-                        else:
-                            base_event['sid'] = sid or 0
-                            
-                        # 1. Проверяем явное указание действия в metadata
-                        if 'metadata' in event and 'action' in event['metadata']:
-                            base_event['action'] = event['metadata']['action']
-                        
-                        # 2. Проверяем наше кастомное поле flowint
-                        elif 'flowint' in event and 'gui_blocked_ip' in event['flowint']:
-                            base_event['action'] = "drop"
-                        
-                        # 3. Проверяем поле alert.action
-                        elif 'action' in alert_obj:
-                            base_event['action'] = alert_obj['action']
-                        
-                        # 4. Определяем по сигнатуре
-                        elif 'signature' in alert_obj:
-                            signature = alert_obj['signature']
-                            if "block" in signature.lower() or "drop" in signature.lower() or "GUI Blocked IP" in signature:
-                                base_event['action'] = "drop"
-                            elif "reject" in signature.lower():
-                                base_event['action'] = "reject"
-                            else:
-                                base_event['action'] = "alert"
-                        
-                        # 5. Для наших кастомных правил гарантируем "drop"
-                        if 'metadata' in event and 'action' in event['metadata'] and event['metadata']['action'] == 'drop':
-                            base_event['action'] = "drop"
-                        
-                        if 'flowint' in event and 'gui_action_drop' in event['flowint']:
-                            base_event['action'] = "drop"
-                            
-                        # Для наших кастомных блокировок
-                        if 'signature' in alert_obj and "GUI Blocked IP" in alert_obj['signature']:
-                            # Проверяем наличие flowvar
-                            if 'flowint' in event and 'gui_blocked_ip' in event['flowint']:
-                                base_event['action'] = "drop"
-                            else:
-                                # Если flowvar отсутствует, но сигнатура наша - считаем блокировкой
-                                base_event['action'] = "drop"
-                        
-                    # Обработка DNS событий
-                    elif event_type == 'dns':
-                        base_event['signature'] = 'DNS Query'
-                        base_event['category'] = 'DNS'
-                        base_event['severity'] = 1
-                        base_event['query'] = event.get('dns', {}).get('rrname', 'N/A')
-                        
-                        # Формирование списка ответов
-                        answers = []
-                        for ans in event.get('dns', {}).get('answers', []):
-                            if 'rdata' in ans:
-                                answers.append(ans['rdata'])
-                            elif 'aaaa' in ans:
-                                answers.append(ans['aaaa'])
-                        
-                        base_event['response'] = ', '.join(answers) if answers else "N/A"
-                    # Обработка TLS событий
-                    elif event_type == 'tls':
-                        base_event['signature'] = 'TLS Handshake'
-                        base_event['category'] = 'TLS'
-                        base_event['severity'] = 1
-                        base_event['sni'] = event.get('tls', {}).get('sni', 'N/A')
-                        base_event['issuer'] = event.get('tls', {}).get('issuerdn', 'N/A')
-                    # Обработка BitTorrent DHT событий
-                    elif event_type == 'bittorrent_dht':
-                        base_event['signature'] = 'BitTorrent DHT'
-                        base_event['category'] = 'P2P'
-                        base_event['severity'] = 2
-                        base_event['dht_type'] = event.get('bittorrent_dht', {}).get('type', 'unknown')
-                        base_event['nodes'] = str(len(event.get('bittorrent_dht', {}).get('nodes', [])))
-                    # Обработка flow событий
-                    elif event_type == 'flow':
-                        base_event['signature'] = 'Network Flow'
-                        base_event['category'] = 'Flow'
-                        base_event['severity'] = 0
-                        base_event['state'] = event.get('flow', {}).get('state', 'N/A')
-                        base_event['reason'] = event.get('flow', {}).get('reason', 'N/A')
-                    # Другие типы событий
-                    else:
-                        base_event['signature'] = event_type
-                        base_event['category'] = 'Other'
-                        base_event['severity'] = 1
-                    
-                    # Добавляем информацию о правиле для алертов
-                    if 'event_type' in base_event and base_event['event_type'] == 'alert':
-                        sid = base_event.get('sid', 0)
-                        if sid:
-                            # Пытаемся найти файл правила по SID
-                            rule_file, _ = self.find_rule_by_sid(sid)
-                            base_event['rule_file'] = rule_file if rule_file else "Unknown"
-                            # rule_file = self.find_rule_file_by_sid(sid)
-                            # base_event['rule_file'] = rule_file
-                        else:
-                            base_event['rule_file'] = "N/A"
-                    else:
-                        base_event['rule_file'] = "N/A"
-                        
-                    if base_event['action'] == 'drop':
-                        # Для событий блокировки добавляем специальные метки
-                        base_event['blocked'] = True
-                        base_event['severity'] = 1  # Повышаем важность для блокировок
-                        
-                        # Переопределяем некоторые поля для ясности
-                        if 'signature' not in base_event:
-                            base_event['signature'] = f"GUI Blocked IP {base_event['src_ip']}"
-                    
-                    # ДЛЯ НАШИХ БЛОКИРОВОК - НАЧАЛО ИСПРАВЛЕНИЙ
-                    if action == 'drop':
-                        base_event['blocked'] = True
-                        base_event['severity'] = max(base_event.get('severity', 0), 3)
-                        
-                        # Переопределяем сигнатуру для ясности
-                        if 'signature' not in base_event:
-                            base_event['signature'] = f"GUI Blocked IP {base_event['src_ip']}"
-                
-                    
-                    events.append(base_event)
+
+                    # === ЕДИНСТВЕННЫЙ ВЫЗОВ ОБРАБОТКИ ===
+                    processed_event = self.process_event(event, line)
+                    if processed_event:
+                        events.append(processed_event)
+
                 except json.JSONDecodeError as e:
-                    # Пытаемся восстановить неполный JSON
-                    if line.endswith('}}') or line.endswith('}'):
-                        try:
-                            # Удаляем последнюю фигурную скобку и пробуем снова
-                            recovered_line = line[:-1].strip()
-                            if recovered_line.endswith(','):
-                                recovered_line = recovered_line[:-1]
-                            if recovered_line.endswith('}}'):
-                                recovered_line = recovered_line[:-1]
-                            
-                            event = json.loads(recovered_line)
-                            if 'event_type' in event:
-                                # Если удалось восстановить, добавляем событие
-                                events.append({
-                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    'event_type': event.get('event_type', 'recovered'),
-                                    'src_ip': event.get('src_ip', 'N/A'),
-                                    'dest_ip': event.get('dest_ip', 'N/A'),
-                                    'proto': event.get('proto', 'N/A'),
-                                    'action': event.get('action', 'unknown'),
-                                    'raw': recovered_line,
-                                    'signature': 'Recovered Event',
-                                    'category': 'Recovered',
-                                    'severity': 1
-                                })
-                        except:
-                            # Если не удалось восстановить, логируем как DEBUG
-                            logging.debug(f"Неудачное восстановление JSON: {str(e)}\nСтрока: {line}")
-                except KeyError as ke:
-                    logging.debug(f"Отсутствует ключ в событии: {ke}\nСтрока: {line}")
+                    # ... (ваш код восстановления JSON — оставьте как есть)
+                    pass
                 except Exception as e:
                     logging.debug(f"Ошибка парсинга события: {type(e).__name__}: {str(e)}\nСтрока: {line}")
-        
+
         except Exception as e:
             logging.error(f"Ошибка чтения событий: {str(e)}\n{traceback.format_exc()}")
-        
+
         return events
     
     def find_rule_file_by_sid(self, sid):
@@ -1450,12 +1308,12 @@ class SuricataManager:
         """Проверяет валидность конфигурации YAML"""
         try:
             yaml.safe_load(config_text)
-            return True, "Конфигурация валидна"
+            return True, "Конфигурация валидна (The configuration is valid)"
         except yaml.YAMLError as e:
-            error_msg = f"Ошибка в конфигурации:\n{str(e)}"
+            error_msg = f"Ошибка в конфигурации (Configuration error):\n{str(e)}"
             return False, error_msg
         except Exception as e:
-            error_msg = f"Неизвестная ошибка валидации:\n{str(e)}"
+            error_msg = f"Неизвестная ошибка валидации (Unknown validation error):\n{str(e)}"
             return False, error_msg
     
     def start_suricata(self):

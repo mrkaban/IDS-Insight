@@ -36,6 +36,9 @@ import tarfile
 import zipfile
 import configparser
 from datetime import datetime
+import hashlib
+import json
+from localization import Translator
 
 APP_STYLE = """
     QGroupBox {
@@ -72,11 +75,27 @@ APP_STYLE = """
     }
 """
 
+def calculate_file_hash(filepath):
+    """Вычисляет SHA-256 хеш файла."""
+    hash_sha256 = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+    except Exception as e:
+        logging.error(f"Ошибка вычисления хеша для {filepath}: {str(e)}")
+        return None
+
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
     
-    def __init__(self):
+    def __init__(self, translator=None):
         super().__init__()
+    
+        # Инициализируем транслятор
+        self.translator = translator or Translator('ru')
+        
         self.setWindowTitle("IDS Insight - Графический интерфейс к системе обнаружения вторжений Suricata")
         self.setGeometry(100, 100, 1200, 800)
         
@@ -91,6 +110,24 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(APP_STYLE)
         
         self.suricata = SuricataManager()
+        
+        # Передаем переводы в менеджер
+        event_translations = {
+            'dns_query': self.translator.tr('dns_query'),
+            'dns': self.translator.tr('dns'),
+            'tls_handshake': self.translator.tr('tls_handshake'),
+            'tls': self.translator.tr('tls'),
+            'bittorrent_dht': self.translator.tr('bittorrent_dht'),
+            'p2p': self.translator.tr('p2p'),
+            'network_flow': self.translator.tr('network_flow'),
+            'flow': self.translator.tr('flow'),
+            'other': self.translator.tr('other'),
+            'unknown': self.translator.tr('unknown'),
+            'logged': self.translator.tr('logged'),
+            'allow': self.translator.tr('allow')
+        }
+        self.suricata.set_translations(event_translations)
+        
         self.current_rules = {}
         self.config_modified = False
         
@@ -126,6 +163,15 @@ class MainWindow(QMainWindow):
         self.about_tab = QWidget()
         self.init_about_tab()
         self.tabs.addTab(self.about_tab, "О программе")
+        
+        # Сохраняем индексы вкладок для надежной проверки
+        self.tab_indexes = {
+            'alerts': 0,
+            'rules': 1,
+            'management': 2,
+            'settings': 3,
+            'about': 4
+        }
         
         # Статус бар
         self.status_bar = QStatusBar()
@@ -168,6 +214,62 @@ class MainWindow(QMainWindow):
         # Проверка отсутствующих файлов правил
         self.check_missing_rule_files()
         
+        # ТЕПЕРЬ вызываем retranslate_ui после полной инициализации
+        self.retranslate_ui()
+        
+        # Устанавливаем правильный индекс в комбобоксе языка
+        # Сначала проверяем сохраненный язык в настройках
+        saved_language = self.suricata.config.get('language', '')
+        if saved_language:
+            current_lang = saved_language
+        else:
+            current_lang = self.translator.language
+            
+        if current_lang == 'ru':
+            self.language_combo.setCurrentIndex(0)  # Русский
+        else:
+            self.language_combo.setCurrentIndex(1)  # English
+        
+    def change_language(self, index):
+        """Изменяет язык интерфейса и сохраняет в настройки"""
+        language = 'ru' if index == 0 else 'en'
+        
+        # Сохраняем язык в конфиг
+        self.suricata.config['language'] = language
+        
+        # Применяем изменения к транслятору
+        self.translator.set_language(language)
+        
+        # Обновляем переводы в менеджере
+        event_translations = {
+            'dns_query': self.translator.tr('dns_query'),
+            'dns': self.translator.tr('dns'),
+            'tls_handshake': self.translator.tr('tls_handshake'),
+            'tls': self.translator.tr('tls'),
+            'bittorrent_dht': self.translator.tr('bittorrent_dht'),
+            'p2p': self.translator.tr('p2p'),
+            'network_flow': self.translator.tr('network_flow'),
+            'flow': self.translator.tr('flow'),
+            'other': self.translator.tr('other'),
+            'unknown': self.translator.tr('unknown'),
+            'logged': self.translator.tr('logged'),
+            'allow': self.translator.tr('allow')
+        }
+        self.suricata.set_translations(event_translations)
+        
+        # Сохраняем ВСЕ настройки включая язык
+        self.save_app_settings()
+        
+        # Обновляем все тексты в интерфейсе
+        self.retranslate_ui()
+        
+        # Показываем сообщение о перезапуске (опционально)
+        QMessageBox.information(
+            self, 
+            self.translator.tr('success'), 
+            self.translator.tr('language_changed_restart')
+        )
+    
     def set_default_time_filter(self):
         """Устанавливает значения по умолчанию для фильтра времени"""
         # Текущее время
@@ -198,8 +300,8 @@ class MainWindow(QMainWindow):
         if missing_files:
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setWindowTitle("Отсутствуют файлы")
-            msg.setText("Следующие файлы не найдены в папке приложения:")
+            msg.setWindowTitle(self.translator.tr('missing_files_title'))
+            msg.setText(self.translator.tr('missing_files_text'))
             msg.setDetailedText("\n".join(missing_files))
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.exec()
@@ -230,10 +332,10 @@ class MainWindow(QMainWindow):
                 self.update_image_size()
                 
             except Exception as e:
-                self.image_label.setText(f"Ошибка загрузки изображения:\n{str(e)}")
+                self.image_label.setText(self.translator.tr('error_loading_image').format(str(e)))
                 self.image_label.setStyleSheet("color: red; font-weight: bold;")
         else:
-            self.image_label.setText("Изображение cat.png не найдено")
+            self.image_label.setText(self.translator.tr('image_not_found'))
             self.image_label.setStyleSheet("color: red; font-weight: bold;")
             
         
@@ -297,7 +399,7 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        main_layout.addWidget(image_frame, 1)  # Коэффициент растяжения 1
+        main_layout.addWidget(image_frame, 1)
         
         # Правая часть: информация о программе
         info_frame = QFrame()
@@ -307,7 +409,7 @@ class MainWindow(QMainWindow):
         info_frame.setLayout(info_layout)
         
         # Верхняя часть: информация об авторе
-        author_frame = QGroupBox("Автор")
+        self.author_group = QGroupBox(self.translator.tr('author'))
         author_layout = QVBoxLayout()
         author_layout.setContentsMargins(15, 15, 15, 15)
         author_layout.setSpacing(10)
@@ -322,7 +424,7 @@ class MainWindow(QMainWindow):
         author_layout.addWidget(QLabel(""))
         
         # Информация об авторе
-        author_label = QLabel("Разработчик:")
+        author_label = QLabel(self.translator.tr('developer'))
         author_label.setFont(QFont("Arial", 12))
         author_layout.addWidget(author_label)
         
@@ -332,7 +434,7 @@ class MainWindow(QMainWindow):
         author_layout.addWidget(author_name)
         
         # Сайт
-        website_label = QLabel("Официальный сайт:")
+        website_label = QLabel(self.translator.tr('official_website'))
         website_label.setFont(QFont("Arial", 12))
         author_layout.addWidget(website_label)
         
@@ -342,20 +444,20 @@ class MainWindow(QMainWindow):
         author_layout.addWidget(website_url)
         
         # Версия программы
-        version_label = QLabel("Версия: 1.0")
+        version_label = QLabel(self.translator.tr('version'))
         version_label.setFont(QFont("Arial", 10))
         version_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         author_layout.addWidget(version_label)
         
-        author_frame.setLayout(author_layout)
-        info_layout.addWidget(author_frame)
+        self.author_group.setLayout(author_layout)
+        info_layout.addWidget(self.author_group)
         
         # Нижняя часть: лицензия
-        license_frame = QGroupBox("Лицензия")
+        self.license_group = QGroupBox(self.translator.tr('license'))
         license_layout = QVBoxLayout()
         license_layout.setContentsMargins(15, 15, 15, 15)
         
-        license_label = QLabel("Лицензионное соглашение:")
+        license_label = QLabel(self.translator.tr('license_agreement'))
         license_label.setFont(QFont("Arial", 10))
         license_layout.addWidget(license_label)
         
@@ -370,18 +472,18 @@ class MainWindow(QMainWindow):
                 with open("LICENSE.txt", "r", encoding="utf-8") as f:
                     license_content = f.read()
             except Exception as e:
-                license_content = f"Ошибка загрузки лицензии: {str(e)}"
+                license_content = self.translator.tr('license_load_error').format(str(e))
         else:
-            license_content = "Файл лицензии (LICENSE.txt) не найден в папке приложения"
+            license_content = self.translator.tr('license_file_not_found')
         
         self.license_text.setText(license_content)
         license_layout.addWidget(self.license_text)
         
-        license_frame.setLayout(license_layout)
-        info_layout.addWidget(license_frame)
+        self.license_group.setLayout(license_layout)
+        info_layout.addWidget(self.license_group)
         
         info_frame.setLayout(info_layout)
-        main_layout.addWidget(info_frame, 2)  # Коэффициент растяжения 2
+        main_layout.addWidget(info_frame, 2)
         
         # Устанавливаем соотношение 1:2 между изображением и информацией
         main_layout.setStretch(0, 1)
@@ -399,12 +501,12 @@ class MainWindow(QMainWindow):
             # Показываем уведомление
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setWindowTitle("Обнаружены отсутствующие файлы правил")
+            msg.setWindowTitle(self.translator.tr('missing_rule_files'))
             
             if updated:
-                msg.setText("Следующие файлы правил отсутствуют и были удалены из конфигурации:")
+                msg.setText(self.translator.tr('missing_files_removed'))
             else:
-                msg.setText("Следующие файлы правил отсутствуют:")
+                msg.setText(self.translator.tr('missing_files_not_removed'))
                 
             # Добавляем подробности
             details = "\n".join(missing_files)
@@ -412,12 +514,10 @@ class MainWindow(QMainWindow):
             
             # Основное сообщение
             main_text = msg.text()
-            msg.setText(f"{main_text}\n\nПодробности см. ниже.")
+            msg.setText(f"{main_text}\n\n{self.translator.tr('see_details_below')}")
             
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.exec()
-
-    
     
     def resize_columns_to_content(self, widget, max_width=400):
         """Автоматическая подгонка ширины колонок с ограничением"""
@@ -438,9 +538,9 @@ class MainWindow(QMainWindow):
         """Показывает предупреждение о недоступности службы"""
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("Служба не найдена")
-        msg.setText(f"Служба Suricata '{self.suricata.service_name}' не найдена!")
-        msg.setInformativeText("Пожалуйста, настройте правильное имя службы.")
+        msg.setWindowTitle(self.translator.tr('service_not_found_title'))
+        msg.setText(self.translator.tr('service_not_found_text').format(self.suricata.service_name))
+        msg.setInformativeText(self.translator.tr('service_not_found_info'))
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg.exec()
     
@@ -451,38 +551,38 @@ class MainWindow(QMainWindow):
         # Панель инструментов
         toolbar = QHBoxLayout()
         
-        self.load_config_btn = QPushButton("Загрузить конфиг")
+        self.load_config_btn = QPushButton(self.translator.tr('load_config'))
         self.load_config_btn.clicked.connect(self.load_config)
         toolbar.addWidget(self.load_config_btn)
         
-        self.save_config_btn = QPushButton("Сохранить конфиг")
+        self.save_config_btn = QPushButton(self.translator.tr('save_config'))
         self.save_config_btn.clicked.connect(self.save_config)
         toolbar.addWidget(self.save_config_btn)
         
-        self.validate_config_btn = QPushButton("Проверить конфиг")
+        self.validate_config_btn = QPushButton(self.translator.tr('validate_config'))
         self.validate_config_btn.clicked.connect(self.validate_config)
         toolbar.addWidget(self.validate_config_btn)
         
-        self.apply_config_btn = QPushButton("Применить конфиг")
+        self.apply_config_btn = QPushButton(self.translator.tr('apply_config'))
         self.apply_config_btn.clicked.connect(self.apply_config)
         toolbar.addWidget(self.apply_config_btn)
         
         layout.addLayout(toolbar)
         
         # Статус конфигурации
-        self.config_status = QLabel("Статус: Конфигурация не загружена")
+        self.config_status = QLabel(f"{self.translator.tr('status')}: {self.translator.tr('config_not_loaded')}")
         self.config_status.setFont(QFont("Arial", 10))
         layout.addWidget(self.config_status)
         
         # Добавляем поле поиска
         search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Поиск:"))
+        self.search_config_label = QLabel(self.translator.tr('search') + ":")
+        search_layout.addWidget(self.search_config_label)
         self.config_search_edit = QLineEdit()
-        self.config_search_edit.setPlaceholderText("Поиск в конфигурации...")
+        self.config_search_edit.setPlaceholderText(self.translator.tr('search_config'))
         self.config_search_edit.textChanged.connect(self.filter_config)
         search_layout.addWidget(self.config_search_edit)
         
-        # Добавляем под тулбаром
         layout.insertLayout(1, search_layout)
         
         # Редактор конфигурации
@@ -491,38 +591,155 @@ class MainWindow(QMainWindow):
         self.config_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.config_editor.textChanged.connect(self.config_modified_handler)
         
-        # Подсветка синтаксиса YAML
         self.highlighter = YamlHighlighter(self.config_editor.document())
-        
         layout.addWidget(self.config_editor)
         
         # Группа настроек
-        settings_group = QGroupBox("Основные настройки")
+        self.settings_group = QGroupBox(self.translator.tr('main_settings'))
         form_layout = QFormLayout()
         
+        # Добавляем поле для имени службы
+        self.service_name_edit = QLineEdit(self.suricata.config.get('service_name', 'SuricataService'))
+        form_layout.addRow("Имя службы:", self.service_name_edit)
+        
         self.suricata_path_edit = QLineEdit(self.suricata.config['suricata_path'])
-        form_layout.addRow("Путь к Suricata:", self.suricata_path_edit)
+        form_layout.addRow(self.translator.tr('suricata_path'), self.suricata_path_edit)
         
         self.rules_dir_edit = QLineEdit(self.suricata.config['rules_dir'])
-        form_layout.addRow("Каталог правил:", self.rules_dir_edit)
+        form_layout.addRow(self.translator.tr('rules_dir'), self.rules_dir_edit)
         
         self.eve_log_edit = QLineEdit(self.suricata.config['eve_log'])
-        form_layout.addRow("Файл логов (eve.json):", self.eve_log_edit)
+        form_layout.addRow(self.translator.tr('eve_log'), self.eve_log_edit)
         
         self.backup_dir_edit = QLineEdit(self.suricata.config['backup_dir'])
-        form_layout.addRow("Каталог резервных копий:", self.backup_dir_edit)
+        form_layout.addRow(self.translator.tr('backup_dir'), self.backup_dir_edit)
         
-        save_settings_btn = QPushButton("Сохранить настройки")
-        save_settings_btn.clicked.connect(self.save_settings)
-        form_layout.addRow(save_settings_btn)
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(["Русский", "English"])
+        self.language_combo.currentIndexChanged.connect(self.change_language)
+        form_layout.addRow("Язык / Language:", self.language_combo)
         
-        settings_group.setLayout(form_layout)
-        layout.addWidget(settings_group)
+        self.save_settings_btn = QPushButton(self.translator.tr('save_settings'))
+        self.save_settings_btn.clicked.connect(self.save_settings)
+        form_layout.addRow(self.save_settings_btn)
+        
+        self.settings_group.setLayout(form_layout)
+        layout.addWidget(self.settings_group)
         
         self.settings_tab.setLayout(layout)
-        
-        # Загружаем конфиг при открытии вкладки
         self.tabs.currentChanged.connect(self.on_tab_changed)
+        
+    def change_language(self, index):
+        """Изменяет язык интерфейса"""
+        language = 'ru' if index == 0 else 'en'
+        self.translator.set_language(language)
+        
+        # Обновляем все тексты в интерфейсе
+        self.retranslate_ui()
+
+    def retranslate_ui(self):
+        """Обновляет все тексты в интерфейсе"""
+        self.setWindowTitle(self.translator.tr('window_title'))
+        
+        # Обновляем названия табов
+        self.tabs.setTabText(0, self.translator.tr('events_tab'))
+        self.tabs.setTabText(1, self.translator.tr('rules_tab'))
+        self.tabs.setTabText(2, self.translator.tr('management_tab'))
+        self.tabs.setTabText(3, self.translator.tr('settings_tab'))
+        self.tabs.setTabText(4, self.translator.tr('about_tab'))
+        
+        # Вкладка событий
+        self.refresh_alerts_btn.setText(self.translator.tr('refresh_events'))
+        self.filter_combo.setItemText(0, self.translator.tr('all_events'))
+        self.filter_combo.setItemText(1, self.translator.tr('alerts_only'))
+        self.filter_combo.setItemText(2, self.translator.tr('dns_events'))
+        self.filter_combo.setItemText(3, self.translator.tr('tls_events'))
+        self.all_events_check.setText(self.translator.tr('show_all_events'))
+        self.auto_refresh_check.setText(self.translator.tr('auto_refresh'))
+        self.refresh_now_btn.setText(self.translator.tr('refresh_now'))
+        self.last_hour_btn.setText(self.translator.tr('last_hour'))
+        self.apply_time_filter_btn.setText(self.translator.tr('apply_filter'))
+        self.clear_time_filter_btn.setText(self.translator.tr('clear_filter'))
+        self.search_edit.setPlaceholderText(self.translator.tr('search_events'))
+        
+        # Заголовки таблицы событий
+        headers = [
+            self.translator.tr('timestamp'),
+            self.translator.tr('event_type'),
+            self.translator.tr('signature'),
+            self.translator.tr('source'),
+            self.translator.tr('destination'),
+            self.translator.tr('protocol'),
+            self.translator.tr('severity'),
+            self.translator.tr('action'),
+            self.translator.tr('details')
+        ]
+        self.alerts_table.setHorizontalHeaderLabels(headers)
+        
+        # Вкладка правил
+        self.import_btn.setText(self.translator.tr('import_rules'))
+        self.refresh_btn.setText(self.translator.tr('refresh'))
+        self.apply_btn.setText(self.translator.tr('apply_changes'))
+        self.backup_btn.setText(self.translator.tr('create_backup'))
+        self.update_rules_btn.setText(self.translator.tr('update_rules'))
+        self.manage_sources_btn.setText(self.translator.tr('manage_sources'))
+        self.rule_search_edit.setPlaceholderText(self.translator.tr('search_rules'))
+        
+        # Деревья правил
+        self.rule_files_tree.setHeaderLabel(self.translator.tr('rule_files'))
+        headers = [
+            self.translator.tr('rule'),
+            self.translator.tr('sid'),
+            self.translator.tr('status')
+        ]
+        self.rules_tree.setHeaderLabels(headers)
+        
+        # Вкладка управления
+        self.service_label.setText(self.translator.tr('service_name'))
+        self.service_cfg_btn.setText(self.translator.tr('configure_service'))
+        self.start_btn.setText(self.translator.tr('start_suricata'))
+        self.stop_btn.setText(self.translator.tr('stop_suricata'))
+        self.restart_btn.setText(self.translator.tr('restart_suricata'))
+        self.log_label.setText(self.translator.tr('application_log'))
+        
+        # Заголовки таблицы логов
+        log_headers = [
+            self.translator.tr('time'),
+            self.translator.tr('level'),
+            self.translator.tr('message')
+        ]
+        self.log_view.setHorizontalHeaderLabels(log_headers)
+        
+        # Вкладка настроек
+        self.load_config_btn.setText(self.translator.tr('load_config'))
+        self.save_config_btn.setText(self.translator.tr('save_config'))
+        self.validate_config_btn.setText(self.translator.tr('validate_config'))
+        self.apply_config_btn.setText(self.translator.tr('apply_config'))
+        self.save_settings_btn.setText(self.translator.tr('save_settings'))
+        
+        # Обновляем статус
+        self.update_status()
+        
+        # Вкладка о программе
+        self.author_group.setTitle(self.translator.tr('author'))
+        self.license_group.setTitle(self.translator.tr('license'))
+        
+        # Обновляем текст лицензии (если нужно)
+        if hasattr(self, 'license_text'):
+            license_content = ""
+            if os.path.exists("LICENSE.txt"):
+                try:
+                    with open("LICENSE.txt", "r", encoding="utf-8") as f:
+                        license_content = f.read()
+                except Exception as e:
+                    license_content = self.translator.tr('license_load_error').format(str(e))
+            else:
+                license_content = self.translator.tr('license_file_not_found')
+            self.license_text.setText(license_content)
+       
+        
+        # Обновляем статус
+        self.update_status()
     
     def filter_config(self):
         """Фильтрует конфигурацию по поисковому запросу"""
@@ -564,13 +781,23 @@ class MainWindow(QMainWindow):
     
     def on_tab_changed(self, index):
         """Обработчик смены вкладки"""
-        if self.tabs.tabText(index) == "Настройки":
+        current_widget = self.tabs.widget(index)
+        
+        if current_widget == self.settings_tab:
             self.load_config()
+        
+        elif current_widget == self.alerts_tab:
+            # Обновляем время в фильтре
+            self.end_datetime.setDateTime(QDateTime.currentDateTime())
+            
+            # Если фильтр не активен, обновляем начало
+            if not self.suricata.config.get('time_filter_enabled', False):
+                self.start_datetime.setDateTime(QDateTime.currentDateTime().addSecs(-3600))
     
     def config_modified_handler(self):
         """Обработчик изменения конфигурации"""
         self.config_modified = True
-        self.config_status.setText("Статус: Конфигурация изменена (не сохранена)")
+        self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_modified')}")
     
     def load_config(self):
         """Загружает конфигурацию Suricata в редактор"""
@@ -578,15 +805,15 @@ class MainWindow(QMainWindow):
             config_text = self.suricata.load_config()
             self.config_editor.setPlainText(config_text)
             self.config_modified = False
-            self.config_status.setText("Статус: Конфигурация загружена")
+            self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_loaded')}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки конфигурации: {str(e)}")
-            self.config_status.setText("Статус: Ошибка загрузки конфигурации")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_loading_config')}: {str(e)}")
+            self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_error')}")
     
     def save_config(self):
         """Сохраняет конфигурацию Suricata в файл"""
         if not self.config_modified:
-            QMessageBox.information(self, "Информация", "Конфигурация не изменена")
+            QMessageBox.information(self, self.translator.tr('info'), self.translator.tr('config_not_modified'))
             return
         # После сохранения проверяем файлы правил
         self.check_missing_rule_files()
@@ -598,8 +825,8 @@ class MainWindow(QMainWindow):
         if not valid:
             reply = QMessageBox.question(
                 self,
-                "Ошибка валидации",
-                f"{message}\n\nВсё равно сохранить?",
+                self.translator.tr('validation_error'),
+                self.translator.tr('save_anyway_question').format(message),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.No:
@@ -607,10 +834,10 @@ class MainWindow(QMainWindow):
         
         if self.suricata.save_config(config_text):
             self.config_modified = False
-            self.config_status.setText("Статус: Конфигурация сохранена")
-            QMessageBox.information(self, "Успех", "Конфигурация успешно сохранена!")
+            self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_saved')}")
+            QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('config_saved'))
         else:
-            QMessageBox.critical(self, "Ошибка", "Ошибка сохранения конфигурации")
+            QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_saving_config'))
     
     def validate_config(self):
         """Проверяет валидность конфигурации"""
@@ -618,19 +845,19 @@ class MainWindow(QMainWindow):
         valid, message = self.suricata.validate_config(config_text)
         
         if valid:
-            QMessageBox.information(self, "Успех", "Конфигурация валидна!")
-            self.config_status.setText("Статус: Конфигурация валидна")
+            QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('config_valid'))
+            self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_valid')}")
         else:
-            QMessageBox.critical(self, "Ошибка", message)
-            self.config_status.setText("Статус: Ошибка в конфигурации")
+            QMessageBox.critical(self, self.translator.tr('error'), message)
+            self.config_status.setText(f"{self.translator.tr('status')}: {self.translator.tr('config_error')}")
     
     def apply_config(self):
         """Применяет конфигурацию и перезапускает Suricata"""
         if self.config_modified:
             reply = QMessageBox.question(
                 self,
-                "Сохранение конфигурации",
-                "Конфигурация была изменена. Сохранить перед применением?",
+                self.translator.tr('save_config_before_apply'),
+                self.translator.tr('save_config_message'),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
             )
             
@@ -641,91 +868,88 @@ class MainWindow(QMainWindow):
         
         try:
             if self.suricata.restart_suricata():
-                QMessageBox.information(self, "Успех", "Suricata успешно перезапущена с новой конфигурацией!")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('suricata_restarted'))
             else:
-                QMessageBox.critical(self, "Ошибка", "Ошибка перезапуска Suricata")
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_restarting'))
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка перезапуска Suricata: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_restarting')}: {str(e)}")
     
     def save_settings(self):
         """Сохраняет основные настройки приложения"""
         new_settings = {
+            'language': self.translator.language,  # Сохраняем текущий язык
+            'service_name': self.service_name_edit.text(),
             'suricata_path': self.suricata_path_edit.text(),
             'rules_dir': self.rules_dir_edit.text(),
             'eve_log': self.eve_log_edit.text(),
             'backup_dir': self.backup_dir_edit.text()
         }
         
-        # Проверка существования путей
+        # Проверка существования путей (кроме service_name и language)
         errors = []
         for key, path in new_settings.items():
-            if not os.path.exists(path):
-                errors.append(f"Путь не существует: {path}")
+            if key not in ['service_name', 'language'] and not os.path.exists(path):
+                errors.append(f"{self.translator.tr('path_not_exists')}: {path}")
         
         if errors:
-            QMessageBox.critical(self, "Ошибка", "\n".join(errors))
+            QMessageBox.critical(self, self.translator.tr('error_invalid_paths'), "\n".join(errors))
             return
         
         # Обновляем настройки в менеджере
         self.suricata.config.update(new_settings)
         
-        # Сохраняем в файл настроек
-        config = configparser.ConfigParser()
-        config['Settings'] = new_settings
+        # Устанавливаем имя службы
+        self.suricata.set_service_name(new_settings['service_name'])
         
-        try:
-            with open("suricata_gui.ini", 'w', encoding='utf-8') as f:
-                config.write(f)
-            
-            self.suricata.rules_dir = new_settings['rules_dir']
-            self.suricata.eve_log = new_settings['eve_log']
-            self.suricata.backup_dir = new_settings['backup_dir']
-            self.suricata.drop_rules = os.path.join(
-                new_settings['rules_dir'], 
-                self.suricata.config['drop_rules']
-            )
-            
-            # Проверяем drop-правила
-            self.suricata.ensure_drop_rules_in_config()
-            
-            # Перезагружаем правила
-            self.load_rules()
-            
-            QMessageBox.information(self, "Успех", "Настройки успешно сохранены!")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения настроек: {str(e)}")
+        # Сохраняем ВСЕ настройки в файл настроек
+        self.save_app_settings()
+        
+        # Обновляем остальные параметры менеджера
+        self.suricata.rules_dir = new_settings['rules_dir']
+        self.suricata.eve_log = new_settings['eve_log']
+        self.suricata.backup_dir = new_settings['backup_dir']
+        self.suricata.drop_rules = os.path.join(
+            new_settings['rules_dir'], 
+            self.suricata.config['drop_rules']
+        )
+        
+        # Проверяем drop-правила
+        self.suricata.ensure_drop_rules_in_config()
+        
+        # Перезагружаем правила
+        self.load_rules()
+        
+        QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('settings_saved'))
             
         
     def init_rules_tab(self):
         """Инициализация вкладки управления правилами"""
-        
         layout = QVBoxLayout()
         
         # Панель инструментов
         toolbar = QHBoxLayout()
         
-        self.import_btn = QPushButton("Импорт правил")
+        self.import_btn = QPushButton(self.translator.tr('import_rules'))
         self.import_btn.clicked.connect(self.import_rules)
         toolbar.addWidget(self.import_btn)
         
-        self.refresh_btn = QPushButton("Обновить")
+        self.refresh_btn = QPushButton(self.translator.tr('refresh'))
         self.refresh_btn.clicked.connect(self.load_rules)
         toolbar.addWidget(self.refresh_btn)
         
-        self.apply_btn = QPushButton("Применить изменения")
+        self.apply_btn = QPushButton(self.translator.tr('apply_changes'))
         self.apply_btn.clicked.connect(self.apply_rule_changes)
         toolbar.addWidget(self.apply_btn)
         
-        self.backup_btn = QPushButton("Создать резервную копию")
+        self.backup_btn = QPushButton(self.translator.tr('create_backup'))
         self.backup_btn.clicked.connect(self.create_backup)
         toolbar.addWidget(self.backup_btn)
         
-        # Добавляем новые кнопки в toolbar
-        self.update_rules_btn = QPushButton("Обновить правила")
+        self.update_rules_btn = QPushButton(self.translator.tr('update_rules'))
         self.update_rules_btn.clicked.connect(self.update_rules_from_sources)
         toolbar.addWidget(self.update_rules_btn)
         
-        self.manage_sources_btn = QPushButton("Управление источниками")
+        self.manage_sources_btn = QPushButton(self.translator.tr('manage_sources'))
         self.manage_sources_btn.clicked.connect(self.manage_rule_sources)
         toolbar.addWidget(self.manage_sources_btn)
         
@@ -733,35 +957,37 @@ class MainWindow(QMainWindow):
         
         # Добавляем поиск по правилам
         search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Поиск правил:"))
+        self.rule_search_label = QLabel(self.translator.tr('search_rules') + ":")
+        search_layout.addWidget(self.rule_search_label)
         
         self.rule_search_edit = QLineEdit()
-        self.rule_search_edit.setPlaceholderText("Поиск по всем правилам...")
+        self.rule_search_edit.setPlaceholderText(self.translator.tr('search_rules'))
         self.rule_search_edit.textChanged.connect(self.filter_rules)
         search_layout.addWidget(self.rule_search_edit)
         
-        layout.addLayout(search_layout)  # Добавить после toolbar
+        layout.addLayout(search_layout)
         
         # Дерево правил
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
         self.rule_files_tree = QTreeWidget()
-        self.rule_files_tree.setHeaderLabel("Файлы правил")
+        self.rule_files_tree.setHeaderLabel(self.translator.tr('rule_files'))
         self.rule_files_tree.itemSelectionChanged.connect(self.on_rule_file_selected)
         
-        # Добавим контекстное меню для файлов правил
         self.rule_files_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rule_files_tree.customContextMenuRequested.connect(self.show_rule_file_menu)
         
         self.rules_tree = QTreeWidget()
-        self.rules_tree.setHeaderLabels(["Правило", "SID", "Статус"])
+        self.rules_tree.setHeaderLabels([
+            self.translator.tr('rule'),
+            self.translator.tr('sid'), 
+            self.translator.tr('status')
+        ])
         self.rules_tree.itemDoubleClicked.connect(self.show_rule_details)
         
-        # Добавляем контекстное меню для правил
         self.rules_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rules_tree.customContextMenuRequested.connect(self.show_rule_context_menu)
             
-        
         splitter.addWidget(self.rule_files_tree)
         splitter.addWidget(self.rules_tree)
         splitter.setSizes([200, 600])
@@ -787,7 +1013,10 @@ class MainWindow(QMainWindow):
             file_item = None
             
             for rule in rules:
-                # Проверяем совпадение в различных полях правила
+                # Проверяем совпадение в различных полях правила + нормализуем строки
+                rule_msg = rule['msg'].lower() if rule['msg'] else ""
+                rule_sid = rule['sid'].lower() if rule['sid'] else ""
+                rule_raw = rule['raw'].lower() if rule['raw'] else ""
                 if (search_text in rule['msg'].lower() or 
                     search_text in rule['sid'].lower() or 
                     search_text in rule['raw'].lower()):
@@ -800,7 +1029,7 @@ class MainWindow(QMainWindow):
                     
                     # Создаем элемент правила
                     rule_item = QTreeWidgetItem([rule['msg'], rule['sid'], 
-                                               "Включено" if rule['enabled'] else "Отключено"])
+                           self.translator.tr('enabled') if rule['enabled'] else self.translator.tr('disabled')])
                     rule_item.setData(0, Qt.ItemDataRole.UserRole, rule)
                     
                     if rule['enabled']:
@@ -833,18 +1062,18 @@ class MainWindow(QMainWindow):
         
         # Действия в зависимости от текущего состояния правила
         if rule_data['enabled']:
-            disable_action = menu.addAction("Отключить правило")
+            disable_action = menu.addAction(self.translator.tr('disable_rule'))
             disable_action.triggered.connect(lambda: self.toggle_rule_action(item, False))
         else:
-            enable_action = menu.addAction("Включить правило")
+            enable_action = menu.addAction(self.translator.tr('enable_rule'))
             enable_action.triggered.connect(lambda: self.toggle_rule_action(item, True))
         
         # Добавляем действие для изменения действия правила
-        change_action = menu.addAction("Изменить действие...")
+        change_action = menu.addAction(self.translator.tr('change_action'))
         change_action.triggered.connect(lambda: self.change_rule_action(item))
         
         # Добавляем действие для редактирования
-        edit_action = menu.addAction("Редактировать правило")
+        edit_action = menu.addAction(self.translator.tr('edit_rule'))
         edit_action.triggered.connect(lambda: self.edit_rule_action(item))
         
         # Показываем меню
@@ -869,10 +1098,10 @@ class MainWindow(QMainWindow):
         
         action, ok = QInputDialog.getItem(
             self, 
-            "Изменение действия правила", 
-            f"Выберите действие для правила SID {rule_data['sid']}:",
+            self.translator.tr('change_rule_action'), 
+            self.translator.tr('select_action').format(rule_data['sid']),
             actions, 
-            current=current_idx,  # ИСПРАВЛЕНО: используем 'current' вместо 'currentIndex'
+            current=current_idx,
             editable=False
         )
         
@@ -899,11 +1128,11 @@ class MainWindow(QMainWindow):
         new_rule_data['raw'] = new_rule
         
         if self.suricata.replace_rule(rule_data, new_rule_data):
-            QMessageBox.information(self, "Успех", "Действие правила успешно изменено!")
+            QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('rule_action_changed'))
             # Обновляем отображение
             self.on_rule_file_selected()
         else:
-            QMessageBox.critical(self, "Ошибка", "Не удалось изменить действие правила")
+            QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_changing_action'))
      
     def toggle_rule_action(self, item, enable):
         """Включает/выключает правило через контекстное меню"""
@@ -920,20 +1149,20 @@ class MainWindow(QMainWindow):
             if enable:
                 for col in range(3):
                     item.setForeground(col, QColor(0, 0, 0))
-                item.setText(2, "Включено")
+                item.setText(2, self.translator.tr('enabled'))
                 item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
             else:
                 for col in range(3):
                     item.setForeground(col, QColor(150, 150, 150))
-                item.setText(2, "Отключено")
+                item.setText(2, self.translator.tr('disabled'))
                 item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton))
                 
             # ОБНОВЛЯЕМ ПРАВИЛО В ТЕКУЩИХ СОБЫТИЯХ
             self.update_rule_in_events(rule_data)
                 
-            QMessageBox.information(self, "Успех", "Статус правила успешно изменен!")
+            QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('rule_status_changed'))
         else:
-            QMessageBox.critical(self, "Ошибка", "Не удалось изменить статус правила")
+            QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_changing_status'))
     
     def update_rule_in_events(self, updated_rule):
         """Обновляет правило в текущих событиях"""
@@ -964,10 +1193,10 @@ class MainWindow(QMainWindow):
         file_enabled = enabled_rules > 0
         
         # Добавим действия в меню
-        enable_action = menu.addAction("Включить все правила")
-        disable_action = menu.addAction("Отключить все правила")
+        enable_action = menu.addAction(self.translator.tr('enable_all_rules'))
+        disable_action = menu.addAction(self.translator.tr('disable_all_rules'))
         menu.addSeparator()
-        delete_action = menu.addAction("Удалить файл правил")
+        delete_action = menu.addAction(self.translator.tr('delete_rule_file'))
         
         action = menu.exec(self.rule_files_tree.mapToGlobal(pos))
         
@@ -981,7 +1210,7 @@ class MainWindow(QMainWindow):
     def manage_rule_sources(self):
         """Открывает диалог управления источниками правил"""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Управление источниками правил")
+        dialog.setWindowTitle(self.translator.tr('manage_sources'))
         dialog.setGeometry(400, 400, 600, 400)
         
         layout = QVBoxLayout()
@@ -995,15 +1224,15 @@ class MainWindow(QMainWindow):
         # Кнопки управления
         btn_layout = QHBoxLayout()
         
-        add_btn = QPushButton("Добавить")
+        add_btn = QPushButton(self.translator.tr('add'))
         add_btn.clicked.connect(lambda: self.add_rule_source(dialog))
         btn_layout.addWidget(add_btn)
         
-        remove_btn = QPushButton("Удалить")
+        remove_btn = QPushButton(self.translator.tr('remove'))
         remove_btn.clicked.connect(self.remove_rule_source)
         btn_layout.addWidget(remove_btn)
         
-        close_btn = QPushButton("Закрыть")
+        close_btn = QPushButton(self.translator.tr('close'))
         close_btn.clicked.connect(dialog.accept)
         btn_layout.addWidget(close_btn)
         
@@ -1014,7 +1243,7 @@ class MainWindow(QMainWindow):
     def add_rule_source(self, parent_dialog):
         """Добавляет новый источник правил"""
         dialog = QDialog(parent_dialog)
-        dialog.setWindowTitle("Добавить источник")
+        dialog.setWindowTitle(self.translator.tr('add_source'))
         dialog.setGeometry(500, 500, 400, 200)
         
         layout = QFormLayout()
@@ -1022,8 +1251,8 @@ class MainWindow(QMainWindow):
         name_edit = QLineEdit()
         url_edit = QLineEdit()
         
-        layout.addRow("Название:", name_edit)
-        layout.addRow("URL:", url_edit)
+        layout.addRow(self.translator.tr('source_name'), name_edit)
+        layout.addRow(self.translator.tr('source_url'), url_edit)
         
         btn_layout = QHBoxLayout()
         
@@ -1031,7 +1260,7 @@ class MainWindow(QMainWindow):
         ok_btn.clicked.connect(dialog.accept)
         btn_layout.addWidget(ok_btn)
         
-        cancel_btn = QPushButton("Отмена")
+        cancel_btn = QPushButton(self.translator.tr('cancel'))
         cancel_btn.clicked.connect(dialog.reject)
         btn_layout.addWidget(cancel_btn)
         
@@ -1054,211 +1283,198 @@ class MainWindow(QMainWindow):
             self.sources_list.takeItem(selected)
     
     def update_rules_from_sources(self):
-        """Обновляет правила из всех источников с обработкой прав доступа"""
-    
+        """Обновляет правила из всех источников с проверкой по хешу и обработкой прав доступа"""
         if not self.rule_sources.sources:
-            QMessageBox.information(self, "Информация", "Нет источников для обновления")
+            QMessageBox.information(self, self.translator.tr('info'), self.translator.tr('no_sources'))
             return
-        
-        # ПРЕДУПРЕЖДЕНИЕ О СБРОСЕ НАСТРОЕК
+
         reply = QMessageBox.question(
             self,
-            "Подтверждение обновления",
-            "Внимание! При обновлении правил все локальные изменения (отключенные правила,\n"
-            "измененные действия) будут сброшены. Вы уверены, что хотите продолжить?",
+            self.translator.tr('confirm_update'),
+            self.translator.tr('confirm_update_message'),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply != QMessageBox.StandardButton.Yes:
             return
-        
-        # Создаем диалог прогресса
-        progress = QProgressDialog("Обновление правил...", "Отмена", 0, len(self.rule_sources.sources) + 2, self)
-        progress.setWindowTitle("Обновление правил")
+
+        # Загружаем сохранённые хеши
+        saved_hashes = self._load_rule_hashes()
+        current_hashes = saved_hashes.copy()
+
+        progress = QProgressDialog(
+            self.translator.tr('updating_rules'), 
+            self.translator.tr('cancel'), 
+            0, len(self.rule_sources.sources) + 2, self
+        )
+        progress.setWindowTitle(self.translator.tr('update_rules'))
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        
+
         success_count = 0
         error_count = 0
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-        
-        # Создаем временную директорию для загрузки
         temp_dir = tempfile.mkdtemp()
-        files_to_copy = []  # Список файлов для копирования
-        downloaded_files = []  # Имена скачанных файлов правил
-        
+        files_to_copy = []  # Список файлов для копирования (только изменившиеся)
+        downloaded_files = []  # Имена всех скачанных файлов
+
         try:
             # Этап 1: Скачивание и подготовка файлов
             for i, source in enumerate(self.rule_sources.sources):
-                progress.setLabelText(f"Загрузка: {source['name']}\nURL: {source['url']}")
+                progress.setLabelText(f"{self.translator.tr('downloading')}: {source['name']}\nURL: {source['url']}")
                 progress.setValue(i)
-                
+
                 if progress.wasCanceled():
                     break
-                
+
                 try:
-                    # Скачиваем и распаковываем во временную директорию
                     source_temp_dir = os.path.join(temp_dir, f"source_{i}")
                     os.makedirs(source_temp_dir, exist_ok=True)
-                    
+
                     files = self.rule_sources.download_and_extract(source['url'], source_temp_dir)
                     if files:
-                        # Добавляем файлы в общий список
-                        files_to_copy.extend(files)
-                        # Сохраняем только имена файлов
-                        downloaded_files.extend([os.path.basename(f) for f in files])
+                        for f in files:
+                            filename = f['filename']
+                            downloaded_files.append(filename)
+                            # Проверяем, изменился ли хеш
+                            if filename not in current_hashes or current_hashes[filename].get('hash') != f['hash']:
+                                files_to_copy.append(f)
+                                # Обновим хеш в текущей копии (для последующего сохранения)
+                                current_hashes[filename] = {
+                                    'hash': f['hash'],
+                                    'url': f['url']
+                                }
                         success_count += 1
                     else:
                         error_count += 1
                 except Exception as e:
                     logging.error(f"Ошибка обработки {source['url']}: {str(e)}")
                     error_count += 1
-            
-            # Если нет файлов для копирования, выходим
+
+            # Если нет файлов для копирования — пропускаем копирование и запрос прав
             if not files_to_copy:
                 progress.close()
                 QMessageBox.information(
                     self,
-                    "Обновление завершено",
-                    f"Скачано источников: {success_count}\nОшибок: {error_count}\nНет файлов для копирования"
+                    self.translator.tr('update_completed'),
+                    f"{self.translator.tr('sources_downloaded')}: {success_count}\n{self.translator.tr('errors')}: {error_count}\n"
+                    f"{self.translator.tr('no_changes')}"
                 )
+                self.load_rules()
                 return
-            
-            # Этап 2: Копирование файлов
-            progress.setLabelText("Копирование файлов...")
+
+            # Этап 2: Копирование файлов (только если есть что копировать)
+            progress.setLabelText(self.translator.tr('copying_files'))
             progress.setValue(len(self.rule_sources.sources) + 1)
-            
+
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+
             if is_admin:
-                # Если есть права администратора - копируем напрямую
-                for file_path in files_to_copy:
-                    filename = os.path.basename(file_path)
-                    dest_path = os.path.join(self.suricata.rules_dir, filename)
-                    shutil.copy(file_path, dest_path)
+                for f in files_to_copy:
+                    dest_path = os.path.join(self.suricata.rules_dir, f['filename'])
+                    shutil.copy(f['path'], dest_path)
             else:
-                # Создаем пакетный файл для копирования
                 bat_content = "@echo off\n"
-                for file_path in files_to_copy:
-                    filename = os.path.basename(file_path)
-                    dest_path = os.path.join(self.suricata.rules_dir, filename)
-                    # Команда для копирования с перезаписью
-                    bat_content += f'copy /Y "{file_path}" "{dest_path}" > nul\n'
+                for f in files_to_copy:
+                    dest_path = os.path.join(self.suricata.rules_dir, f['filename'])
+                    bat_content += f'copy /Y "{f["path"]}" "{dest_path}" > nul\n'
                 bat_content += "exit 0\n"
-                
+
                 bat_path = os.path.join(temp_dir, "copy_rules.bat")
                 with open(bat_path, 'w') as bat_file:
                     bat_file.write(bat_content)
-                
-                # Запускаем пакетный файл с правами администратора
+
                 process_info = shell.ShellExecuteEx(
                     fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
                     lpVerb='runas',
                     lpFile=bat_path,
                     nShow=0
                 )
-                
-                # Ждем завершения процесса копирования
                 win32event.WaitForSingleObject(process_info['hProcess'], -1)
                 win32api.CloseHandle(process_info['hProcess'])
-            
+
+            # Сохраняем обновлённые хеши
+            self._save_rule_hashes(current_hashes)
+
             # Этап 3: Обновление конфигурации Suricata
-            progress.setLabelText("Обновление конфигурации...")
+            progress.setLabelText(self.translator.tr('updating_config'))
             progress.setValue(len(self.rule_sources.sources) + 2)
-            
-            # Загружаем текущую конфигурацию
+
             config_yaml = self.suricata.load_config()
-            
+            added_files = []
             try:
-                # Парсим YAML-конфигурацию
-                config = yaml.safe_load(config_yaml)
-                if config is None:
-                    config = {}
-                
-                # Инициализируем список файлов правил, если его нет
+                config = yaml.safe_load(config_yaml) or {}
                 if 'rule-files' not in config:
                     config['rule-files'] = []
-                
-                # Получаем текущий список файлов правил
+
                 current_rule_files = config['rule-files']
-                
-                # Добавляем новые файлы, которых еще нет в конфигурации
-                added_files = []
                 for filename in downloaded_files:
-                    # Проверяем, что это файл правил и его еще нет в конфиге
                     if filename.endswith('.rules') and filename not in current_rule_files:
                         current_rule_files.append(filename)
                         added_files.append(filename)
-                
-                # Если были добавлены новые файлы, сохраняем конфигурацию
+
                 if added_files:
                     config['rule-files'] = current_rule_files
                     new_config_yaml = yaml.dump(config, default_flow_style=False, sort_keys=False)
-                    
-                    # Сохраняем обновленный конфиг
                     self.suricata.save_config(new_config_yaml)
-                    
                     logging.info(f"Добавлены новые файлы правил в конфиг: {', '.join(added_files)}")
-            
-            except yaml.YAMLError as e:
-                logging.error(f"Ошибка разбора конфигурации YAML: {str(e)}")
+
             except Exception as e:
                 logging.error(f"Ошибка обновления конфигурации: {str(e)}")
-        
+
         except Exception as e:
             logging.error(f"Ошибка обновления правил: {str(e)}")
             QMessageBox.critical(self, "Ошибка", f"Ошибка обновления правил: {str(e)}")
         finally:
-            # Удаляем временную директорию
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception as e:
                 logging.error(f"Ошибка удаления временной директории: {str(e)}")
             progress.close()
-        
-        # Перезагружаем правила
+
         self.load_rules()
-        
+
         QMessageBox.information(
-            self,
-            "Обновление завершено",
-            f"Успешно обработано источников: {success_count}\n"
-            f"Ошибок: {error_count}\n"
-            f"Скопировано файлов: {len(files_to_copy)}\n"
-            f"Добавлено в конфиг: {len(added_files) if 'added_files' in locals() else 0}"
+                self,
+            self.translator.tr('update_completed'),
+            self.translator.tr('update_summary').format(success_count, error_count, len(files_to_copy), len(added_files))
         )
         
     def toggle_rule_file(self, filename, enable):
         """Включает/выключает файл правил"""
         if self.suricata.toggle_rule_file(filename, enable):
             self.load_rules()
+            action_text = self.translator.tr('enable') if enable else self.translator.tr('disable')
             QMessageBox.information(
                 self, 
-                "Успех", 
-                f"Все правила в '{filename}' {'включены' if enable else 'отключены'}"
+                self.translator.tr('success'), 
+                self.translator.tr('rules_enabled').format(filename) if enable else self.translator.tr('rules_disabled').format(filename)
             )
         else:
             QMessageBox.critical(
                 self, 
-                "Ошибка", 
-                f"Не удалось {'включить' if enable else 'отключить'} правила в '{filename}'"
+                self.translator.tr('error'), 
+                self.translator.tr('error_toggling_rules').format(
+                    self.translator.tr('enable') if enable else self.translator.tr('disable'), 
+                    filename
+                )
             )
     
     def delete_rule_file(self, filename):
         """Удаляет файл правил"""
         reply = QMessageBox.question(
             self,
-            "Подтверждение удаления",
-            f"Вы уверены, что хотите удалить '{filename}'?",
+            self.translator.tr('confirm_deletion'),
+            self.translator.tr('confirm_delete_file').format(filename),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply == QMessageBox.StandardButton.Yes:
-            try:
-                filepath = os.path.join(self.suricata.rules_dir, filename)
-                os.remove(filepath)
+            if self.suricata.delete_rule_file(filename):
                 self.load_rules()
-                QMessageBox.information(self, "Успех", f"Файл '{filename}' удален")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Ошибка при удалении файла: {str(e)}\n{traceback.format_exc()}")
-    
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('file_deleted_success').format(filename))
+            else:
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_deleting_file'))
+
+
     def rule_state_changed(self, item, column):
         """Обработчик изменения состояния правила"""
         if column != 2:  # Только для колонки Status
@@ -1288,7 +1504,22 @@ class MainWindow(QMainWindow):
     def save_app_settings(self):
         """Сохраняет настройки приложения в файл"""
         config = configparser.ConfigParser()
-        config['Settings'] = {
+        
+        # Загружаем существующие настройки, чтобы сохранить language_dialog_disabled
+        existing_settings = {}
+        if os.path.exists("suricata_gui.ini"):
+            try:
+                existing_config = configparser.ConfigParser()
+                existing_config.read("suricata_gui.ini", encoding='utf-8')
+                if 'Settings' in existing_config:
+                    existing_settings = dict(existing_config['Settings'])
+            except Exception as e:
+                logging.error(f"Ошибка чтения существующих настроек: {str(e)}")
+        
+        # Подготавливаем новые настройки
+        new_settings = {
+            'language': self.suricata.config.get('language', 'ru'),
+            'service_name': self.suricata.config.get('service_name', 'SuricataService'),
             'suricata_path': self.suricata.config['suricata_path'],
             'rules_dir': self.suricata.config['rules_dir'],
             'eve_log': self.suricata.config['eve_log'],
@@ -1301,8 +1532,14 @@ class MainWindow(QMainWindow):
             'auto_refresh': str(self.auto_refresh_check.isChecked())
         }
         
+        # Сохраняем настройку language_dialog_disabled, если она существует
+        if 'language_dialog_disabled' in existing_settings:
+            new_settings['language_dialog_disabled'] = existing_settings['language_dialog_disabled']
+        
+        config['Settings'] = new_settings
+        
         try:
-            with open("suricata_gui.ini", 'w') as f:
+            with open("suricata_gui.ini", 'w', encoding='utf-8') as f:
                 config.write(f)
         except Exception as e:
             logging.error(f"Ошибка сохранения настроек приложения: {str(e)}")
@@ -1315,17 +1552,23 @@ class MainWindow(QMainWindow):
         # Панель инструментов
         toolbar = QHBoxLayout()
         
-        self.refresh_alerts_btn = QPushButton("Обновить события")
+        self.refresh_alerts_btn = QPushButton(self.translator.tr('refresh_events'))
         self.refresh_alerts_btn.clicked.connect(self.load_alerts)
         toolbar.addWidget(self.refresh_alerts_btn)
         
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["Все события", "Только алерты", "DNS события", "TLS события"])
+        self.filter_combo.addItems([
+            self.translator.tr('all_events'),
+            self.translator.tr('alerts_only'), 
+            self.translator.tr('dns_events'),
+            self.translator.tr('tls_events')
+        ])
         self.filter_combo.currentIndexChanged.connect(self.load_alerts)
         toolbar.addWidget(self.filter_combo)
         
         # Добавляем элемент управления для лимита событий
-        toolbar.addWidget(QLabel("Событий:"))
+        self.events_limit_label = QLabel(self.translator.tr('events_limit'))
+        toolbar.addWidget(self.events_limit_label)
         self.events_limit_spin = QSpinBox()
         self.events_limit_spin.setMinimum(100)
         self.events_limit_spin.setMaximum(100000)
@@ -1334,75 +1577,84 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.events_limit_spin)
         
         # Галочка "Все"
-        self.all_events_check = QCheckBox("Все события")
+        self.all_events_check = QCheckBox(self.translator.tr('show_all_events'))
         self.all_events_check.setChecked(self.suricata.config['show_all_events'])
         self.all_events_check.stateChanged.connect(self.toggle_all_events)
         toolbar.addWidget(self.all_events_check)
         
         # Галочка "Автообновление"
-        self.auto_refresh_check = QCheckBox("Автообновление")
-        self.auto_refresh_check.setChecked(True)  # По умолчанию включено
+        self.auto_refresh_check = QCheckBox(self.translator.tr('auto_refresh'))
+        self.auto_refresh_check.setChecked(True)
         self.auto_refresh_check.stateChanged.connect(self.toggle_auto_refresh)
         toolbar.addWidget(self.auto_refresh_check)
         
         # Кнопка "Обновить сейчас"
-        self.refresh_now_btn = QPushButton("Обновить сейчас")
+        self.refresh_now_btn = QPushButton(self.translator.tr('refresh_now'))
         self.refresh_now_btn.clicked.connect(self.load_alerts)
         toolbar.addWidget(self.refresh_now_btn)
         
         # Фильтр по времени
-        time_filter_group = QGroupBox("Фильтр по времени")
+        self.time_filter_group = QGroupBox(self.translator.tr('time_filter'))
         time_layout = QHBoxLayout()
         
         # Кнопка "Текущий час"
-        self.last_hour_btn = QPushButton("Текущий час")
+        self.last_hour_btn = QPushButton(self.translator.tr('last_hour'))
         self.last_hour_btn.clicked.connect(self.set_last_hour_filter)
         time_layout.addWidget(self.last_hour_btn)
         
-        time_layout.addWidget(QLabel("С:"))
+        self.start_time_label = QLabel(self.translator.tr('start_time'))
+        time_layout.addWidget(self.start_time_label)
         
         # Виджет начального времени
         self.start_datetime = QDateTimeEdit()
         self.start_datetime.setDisplayFormat("dd.MM.yyyy HH:mm:ss")
         self.start_datetime.setCalendarPopup(True)
         self.start_datetime.setDateTime(QDateTime.currentDateTime().addSecs(-3600))
-        self.start_datetime.setFixedWidth(150)  # Фиксированная ширина
+        self.start_datetime.setFixedWidth(150)
         time_layout.addWidget(self.start_datetime)
 
-        time_layout.addWidget(QLabel("По:"))  # ДОБАВЛЕНО: метка для конечного времени
+        self.end_time_label = QLabel(self.translator.tr('end_time'))
+        time_layout.addWidget(self.end_time_label)
         self.end_datetime = QDateTimeEdit()
         self.end_datetime.setDisplayFormat("dd.MM.yyyy HH:mm:ss")
         self.end_datetime.setCalendarPopup(True)
-        self.end_datetime.setDateTime(QDateTime.currentDateTime())  # Текущее время
+        self.end_datetime.setDateTime(QDateTime.currentDateTime())
         self.end_datetime.setFixedWidth(150)
         time_layout.addWidget(self.end_datetime)
         
-        self.apply_time_filter_btn = QPushButton("Применить")
+        self.apply_time_filter_btn = QPushButton(self.translator.tr('apply_filter'))
         self.apply_time_filter_btn.clicked.connect(self.apply_time_filter)
         time_layout.addWidget(self.apply_time_filter_btn)
         
-        self.clear_time_filter_btn = QPushButton("Сбросить")
+        self.clear_time_filter_btn = QPushButton(self.translator.tr('clear_filter'))
         self.clear_time_filter_btn.clicked.connect(self.clear_time_filter)
         time_layout.addWidget(self.clear_time_filter_btn)
         
-        time_filter_group.setLayout(time_layout)
-        layout.addWidget(time_filter_group)
+        self.time_filter_group.setLayout(time_layout)
+        layout.addWidget(self.time_filter_group)
         
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Поиск событий...")
+        self.search_edit.setPlaceholderText(self.translator.tr('search_events'))
         self.search_edit.textChanged.connect(self.filter_alerts)
         toolbar.addWidget(self.search_edit)
         
         layout.addLayout(toolbar)
         
         time_layout.addStretch(1)
-        
+
         # Таблица событий
         self.alerts_table = QTableWidget()
-        self.alerts_table.setColumnCount(9)  # Увеличили количество колонок
+        self.alerts_table.setColumnCount(9)
         self.alerts_table.setHorizontalHeaderLabels([
-            "Время", "Тип события", "Сигнатура", "Источник", 
-            "Назначение", "Протокол", "Важность", "Действие", "Детали"
+            self.translator.tr('timestamp'),
+            self.translator.tr('event_type'),
+            self.translator.tr('signature'),
+            self.translator.tr('source'),
+            self.translator.tr('destination'),
+            self.translator.tr('protocol'),
+            self.translator.tr('severity'),
+            self.translator.tr('action'),
+            self.translator.tr('details')
         ])
         self.alerts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.alerts_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1410,12 +1662,27 @@ class MainWindow(QMainWindow):
         self.alerts_table.cellDoubleClicked.connect(self.show_alert_details)
         self.alerts_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.alerts_table.customContextMenuRequested.connect(self.show_alert_context_menu)
-        
-        
+
+        # Включаем сортировку
+        self.alerts_table.setSortingEnabled(True)
+        self.alerts_table.horizontalHeader().sectionClicked.connect(self.sort_alerts_table)
+
         layout.addWidget(self.alerts_table)
         self.alerts_tab.setLayout(layout)
-        
+
         self.load_time_filter_values()
+
+    # Метод для обработки сортировки
+    def sort_alerts_table(self, logical_index):
+        """Обработчик сортировки таблицы событий"""
+        # Сохраняем текущую позицию прокрутки
+        scroll_pos = self.alerts_table.verticalScrollBar().value()
+
+        # Сортируем таблицу
+        self.alerts_table.sortByColumn(logical_index, self.alerts_table.horizontalHeader().sortIndicatorOrder())
+
+        # Восстанавливаем позицию прокрутки
+        self.alerts_table.verticalScrollBar().setValue(scroll_pos)
         
     def set_last_hour_filter(self):
         """Устанавливает фильтр на последний час"""
@@ -1436,14 +1703,14 @@ class MainWindow(QMainWindow):
             if self.suricata.config.get('show_all_events', False):
                 QMessageBox.warning(
                     self,
-                    "Автообновление отключено",
-                    "В режиме 'Все события' автообновление отключено для предотвращения задержек."
+                    self.translator.tr('auto_refresh_warning'),
+                    self.translator.tr('auto_refresh_message')
                 )
                 self.auto_refresh_check.setChecked(False)
             else:
                 self.events_timer.start(10000)
             self.events_timer.start(10000)
-            self.load_alerts()  # Загружаем события сразу при включении
+            self.load_alerts()
         else:
             self.events_timer.stop()
     
@@ -1459,8 +1726,8 @@ class MainWindow(QMainWindow):
             self.auto_refresh_check.setChecked(False)
             QMessageBox.warning(
                 self,
-                "Автообновление отключено",
-                "В режиме 'Все события' автообновление отключено для предотвращения задержек."
+                self.translator.tr('auto_refresh_disabled'),
+                self.translator.tr('auto_refresh_disabled_message')
             )
         
         # Если выключили режим "Все" и автообновление было включено - запускаем
@@ -1510,18 +1777,18 @@ class MainWindow(QMainWindow):
     
     def on_tab_changed(self, index):
         """Обработчик смены вкладки"""
-        tab_name = self.tabs.tabText(index)
+        current_widget = self.tabs.widget(index)
         
-        if tab_name == "События":
+        if current_widget == self.settings_tab:
+            self.load_config()
+        
+        elif current_widget == self.alerts_tab:
             # Обновляем время в фильтре
             self.end_datetime.setDateTime(QDateTime.currentDateTime())
             
             # Если фильтр не активен, обновляем начало
             if not self.suricata.config.get('time_filter_enabled', False):
                 self.start_datetime.setDateTime(QDateTime.currentDateTime().addSecs(-3600))
-        
-        elif tab_name == "Настройки":
-            self.load_config()
     
     
     def init_manage_tab(self):
@@ -1530,35 +1797,36 @@ class MainWindow(QMainWindow):
         
         # Настройка имени службы
         service_layout = QHBoxLayout()
-        service_layout.addWidget(QLabel("Имя службы:"))
+        self.service_label = QLabel(self.translator.tr('service_name'))
+        service_layout.addWidget(self.service_label)
         
         self.service_edit = QLineEdit(self.suricata.service_name)
         self.service_edit.textChanged.connect(self.update_service_name)
         service_layout.addWidget(self.service_edit)
         
-        self.service_cfg_btn = QPushButton("Настроить службу")
+        self.service_cfg_btn = QPushButton(self.translator.tr('configure_service'))
         self.service_cfg_btn.clicked.connect(self.configure_service)
         service_layout.addWidget(self.service_cfg_btn)
         
         layout.addLayout(service_layout)
         
         # Статус
-        self.status_label = QLabel("Статус: Проверка...")
+        self.status_label = QLabel(f"{self.translator.tr('status')}: {self.translator.tr('checking_status')}")
         self.status_label.setFont(QFont("Arial", 12))
         layout.addWidget(self.status_label)
         
         # Кнопки управления
         btn_layout = QHBoxLayout()
         
-        self.start_btn = QPushButton("Запустить Suricata")
+        self.start_btn = QPushButton(self.translator.tr('start_suricata'))
         self.start_btn.clicked.connect(self.start_suricata)
         btn_layout.addWidget(self.start_btn)
         
-        self.stop_btn = QPushButton("Остановить Suricata")
+        self.stop_btn = QPushButton(self.translator.tr('stop_suricata'))
         self.stop_btn.clicked.connect(self.stop_suricata)
         btn_layout.addWidget(self.stop_btn)
         
-        self.restart_btn = QPushButton("Перезапустить Suricata")
+        self.restart_btn = QPushButton(self.translator.tr('restart_suricata'))
         self.restart_btn.clicked.connect(self.restart_suricata)
         btn_layout.addWidget(self.restart_btn)
         
@@ -1569,12 +1837,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.service_info)
         
         # Логи
-        self.log_label = QLabel("Журнал приложения:")
+        self.log_label = QLabel(self.translator.tr('application_log'))
         layout.addWidget(self.log_label)
         
         self.log_view = QTableWidget()
         self.log_view.setColumnCount(3)
-        self.log_view.setHorizontalHeaderLabels(["Время", "Уровень", "Сообщение"])
+        self.log_view.setHorizontalHeaderLabels([
+            self.translator.tr('time'),
+            self.translator.tr('level'),
+            self.translator.tr('message')
+        ])
         self.log_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.log_view)
         
@@ -1595,25 +1867,26 @@ class MainWindow(QMainWindow):
         
         # Блокировка источника
         if event['src_ip'] not in local_ips:
-            block_src_action = menu.addAction(f"Блокировать источник {event['src_ip']}")
+            block_src_action = menu.addAction(f"{self.translator.tr('block_source')} {event['src_ip']}")
             block_src_action.triggered.connect(lambda: self.block_alert_ip(event['src_ip']))
         
         # Блокировка назначения
         if event['dest_ip'] not in local_ips:
-            block_dst_action = menu.addAction(f"Блокировать назначение {event['dest_ip']}")
+            block_dst_action = menu.addAction(f"{self.translator.tr('block_destination')} {event['dest_ip']}")
             block_dst_action.triggered.connect(lambda: self.block_alert_ip(event['dest_ip']))
         
         if menu.actions():
             menu.exec(self.alerts_table.viewport().mapToGlobal(pos))
     
     def configure_service(self):
-        """Открывает диалог настройки службы"""
-        dialog = ServiceDialog(self.suricata.service_name, self)
+        """Настраивает службу Suricata"""
+        dialog = ServiceDialog(self.suricata.service_name, self, self.translator)  # Добавлен translator
         if dialog.exec():
             new_name = dialog.service_edit.text().strip()
             if new_name:
                 self.suricata.set_service_name(new_name)
-                self.service_edit.setText(new_name)
+                self.service_name_edit.setText(new_name)
+                self.save_settings()
                 self.update_status()
     
     def update_service_name(self):
@@ -1627,41 +1900,41 @@ class MainWindow(QMainWindow):
         """Обновляет статус Suricata"""
         try:
             if not self.suricata.service_exists():
-                status = "Служба не найдена"
-                self.status_label.setText(f"Статус: {status}")
-                self.status_bar.showMessage(f"Статус Suricata: {status}")
-                self.service_info.setText(f"Служба '{self.suricata.service_name}' не установлена")
+                status = self.translator.tr('service_not_found')
+                self.status_label.setText(f"{self.translator.tr('status')}: {status}")
+                self.status_bar.showMessage(f"{self.translator.tr('service_status')}: {status}")
+                self.service_info.setText(f"{self.translator.tr('service')} '{self.suricata.service_name}' {self.translator.tr('not_installed')}")
                 return
                 
-            status = "Работает" if self.suricata.is_suricata_running() else "Остановлена"
-            self.status_label.setText(f"Статус: {status}")
-            self.status_bar.showMessage(f"Статус Suricata: {status} (служба: {self.suricata.service_name})")
+            status = self.translator.tr('suricata_running') if self.suricata.is_suricata_running() else self.translator.tr('suricata_stopped')
+            self.status_label.setText(f"{self.translator.tr('status')}: {status}")
+            self.status_bar.showMessage(f"{self.translator.tr('service_status')}: {status} ({self.translator.tr('service')}: {self.suricata.service_name})")
             
             # Дополнительная информация о службе
             try:
                 service_status = win32serviceutil.QueryServiceStatus(self.suricata.service_name)
                 state = service_status[1]
                 state_name = {
-                    win32service.SERVICE_STOPPED: "Остановлена",
-                    win32service.SERVICE_START_PENDING: "Запускается",
-                    win32service.SERVICE_STOP_PENDING: "Останавливается",
-                    win32service.SERVICE_RUNNING: "Работает",
-                    win32service.SERVICE_CONTINUE_PENDING: "Возобновляется",
-                    win32service.SERVICE_PAUSE_PENDING: "Приостанавливается",
-                    win32service.SERVICE_PAUSED: "Приостановлена"
-                }.get(state, f"Неизвестно ({state})")
+                    win32service.SERVICE_STOPPED: self.translator.tr('stopped'),
+                    win32service.SERVICE_START_PENDING: self.translator.tr('starting'),
+                    win32service.SERVICE_STOP_PENDING: self.translator.tr('stopping'),
+                    win32service.SERVICE_RUNNING: self.translator.tr('running'),
+                    win32service.SERVICE_CONTINUE_PENDING: self.translator.tr('resuming'),
+                    win32service.SERVICE_PAUSE_PENDING: self.translator.tr('pausing'),
+                    win32service.SERVICE_PAUSED: self.translator.tr('paused')
+                }.get(state, f"{self.translator.tr('unknown')} ({state})")
                 
                 self.service_info.setText(
-                    f"Служба: {self.suricata.service_name}\n"
-                    f"Статус: {state_name}\n"
-                    f"Принимаемые команды: {service_status[2]}"
+                    f"{self.translator.tr('service')}: {self.suricata.service_name}\n"
+                    f"{self.translator.tr('status')}: {state_name}\n"
+                    f"{self.translator.tr('accepted_commands')}: {service_status[2]}"
                 )
             except Exception as e:
-                self.service_info.setText(f"Ошибка информации о службе: {str(e)}\n{traceback.format_exc()}")
+                self.service_info.setText(f"{self.translator.tr('error_service_info')}: {str(e)}")
                 
         except Exception as e:
             logging.error(f"Error updating status: {str(e)}\n{traceback.format_exc()}")
-            self.status_label.setText(f"Статус: Ошибка - {str(e)}")
+            self.status_label.setText(f"{self.translator.tr('status')}: {self.translator.tr('error')} - {str(e)}")
     
     def update_log_view(self):
         """Обновляет просмотр логов"""
@@ -1775,6 +2048,40 @@ class MainWindow(QMainWindow):
         
         if rule_files:
             self.rule_files_tree.setCurrentItem(self.rule_files_tree.topLevelItem(0))
+
+    def _calculate_file_hash(self, filepath):
+        """Вычисляет SHA-256 хеш файла."""
+        hash_sha256 = hashlib.sha256()
+        try:
+            with open(filepath, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
+        except Exception as e:
+            logging.error(f"Ошибка вычисления хеша для {filepath}: {str(e)}")
+            return None
+
+
+    def _load_rule_hashes(self):
+        """Загружает сохранённые хеши правил из rule_hashes.json."""
+        hashes_file = "rule_hashes.json"
+        if not os.path.exists(hashes_file):
+            return {}
+        try:
+            with open(hashes_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки хешей из {hashes_file}: {str(e)}")
+            return {}
+
+
+    def _save_rule_hashes(self, hashes):
+        """Сохраняет хеши правил в rule_hashes.json."""
+        try:
+            with open("rule_hashes.json", 'w', encoding='utf-8') as f:
+                json.dump(hashes, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"Ошибка сохранения хешей: {str(e)}")
     
     
     def on_rule_file_selected(self):
@@ -1790,7 +2097,7 @@ class MainWindow(QMainWindow):
         
         for rule in rules:
             item = QTreeWidgetItem([rule['msg'], rule['sid'], 
-                                   "Включено" if rule['enabled'] else "Отключено"])
+                       self.translator.tr('enabled') if rule['enabled'] else self.translator.tr('disabled')])
             item.setData(0, Qt.ItemDataRole.UserRole, rule)
             
             # Устанавливаем иконку статуса
@@ -1815,7 +2122,7 @@ class MainWindow(QMainWindow):
         rule_data = item.data(0, Qt.ItemDataRole.UserRole)
         
         # Передаем manager в диалог
-        dialog = RuleDialog(rule_data, self.suricata, self)
+        dialog = RuleDialog(rule_data, self.suricata, self, self.translator)
         
         if dialog.exec():
             # После закрытия диалога обновляем отображение
@@ -1824,15 +2131,12 @@ class MainWindow(QMainWindow):
             if current_file_item:
                 self.on_rule_file_selected()
         
-   
     
     def import_rules(self):
         """Импортирует файлы с правилами"""
-    
-        
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Выберите файлы правил",
+            self.translator.tr('select_rule_files'),
             "",
             "Правила Suricata (*.rules)"
         )
@@ -1874,13 +2178,13 @@ class MainWindow(QMainWindow):
             
             self.load_rules()
             logging.info(f"Импортированные файлы правил: {', '.join(files)}")
-            QMessageBox.information(self, "Успех", "Правила успешно импортированы!")
+            QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('rules_imported_successfully'))
             # После импорта проверяем файлы
             self.check_missing_rule_files()
             self.load_rules()
         except Exception as e:
             logging.error(f"Ошибка импорта правил: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка импорта правил: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_importing_rules')}: {str(e)}")
     
     def add_rule_to_config(self, filename):
         """Добавляет правило в конфигурацию Suricata"""
@@ -1914,12 +2218,12 @@ class MainWindow(QMainWindow):
         try:
             if self.suricata.restart_suricata():
                 logging.info("Изменения правил применены")
-                QMessageBox.information(self, "Успех", "Изменения правил успешно применены!")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('rule_changes_applied'))
             else:
-                QMessageBox.critical(self, "Ошибка", "Ошибка перезапуска Suricata")
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_applying_changes'))
         except Exception as e:
             logging.error(f"Ошибка применения изменений: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка применения изменений: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_applying_changes')}: {str(e)}")
 
    
     def create_backup(self):
@@ -1928,12 +2232,12 @@ class MainWindow(QMainWindow):
             backup_path = self.suricata.backup_rules()
             QMessageBox.information(
                 self, 
-                "Резервная копия создана", 
-                f"Резервная копия правил создана в:\n{backup_path}"
+                self.translator.tr('backup_created'), 
+                self.translator.tr('backup_created_message').format(backup_path)
             )
         except Exception as e:
             logging.error(f"Ошибка создания резервной копии: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка создания резервной копии: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_creating_backup')}: {str(e)}")
     
     def load_alerts(self):
         """Загружает события в таблицу с поддержкой фильтрации по времени"""
@@ -1956,7 +2260,7 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         try:
             # Показываем статус загрузки
-            self.status_bar.showMessage("Загрузка событий...")
+            self.status_bar.showMessage(self.translator.tr('loading_events'))
             QApplication.processEvents()
             
             # Определяем параметры фильтра
@@ -2021,11 +2325,12 @@ class MainWindow(QMainWindow):
             self.update_events_table(events)
             
             # Обновляем статус
-            self.status_bar.showMessage(f"Загружено событий: {len(events)} | Последнее обновление: {datetime.now().strftime('%H:%M:%S')}")
+            status_message = f"{self.translator.tr('events_loaded_count').format(len(events))} | {self.translator.tr('last_update').format(datetime.now().strftime('%H:%M:%S'))}"
+            self.status_bar.showMessage(status_message)
             
         except Exception as e:
             logging.error(f"Ошибка загрузки событий: {str(e)}\n{traceback.format_exc()}")
-            self.status_bar.showMessage("Ошибка загрузки событий")
+            self.status_bar.showMessage(self.translator.tr('error_loading_events'))
         finally:
             # Скрываем анимацию
             self.loading_label.hide()
@@ -2037,7 +2342,7 @@ class MainWindow(QMainWindow):
         self.alerts_table.setRowCount(0)
         self.current_events = events
         self.alerts_table.setRowCount(len(events))
-        
+
         for i, event in enumerate(events):
             # Основные поля
             self.alerts_table.setItem(i, 0, QTableWidgetItem(event['timestamp']))
@@ -2047,42 +2352,47 @@ class MainWindow(QMainWindow):
             self.alerts_table.setItem(i, 4, QTableWidgetItem(event['dest_ip']))
             self.alerts_table.setItem(i, 5, QTableWidgetItem(event['proto']))
             self.alerts_table.setItem(i, 6, QTableWidgetItem(str(event.get('severity', 0))))
-            
-            # Колонка действия
+
+            # === ИСПРАВЛЕННАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ДЕЙСТВИЯ ===
+            action_text = self.translator.tr('unknown')
+            action = event.get('action', 'unknown')
+
+            # 1. Если явно помечено как заблокировано — "Блокировка"
             if event.get('blocked', False):
-                action_text = 'Блокировка'
+                action_text = self.translator.tr('blocked')
+            # 2. Если действие — 'drop' (даже если Suricata написала "allowed") — "Блокировка"
+            elif action == 'drop':
+                action_text = self.translator.tr('blocked')
+            # 3. Для GUI-блокировок — всегда "Блокировка"
+            elif 'signature' in event and "GUI Blocked" in event['signature']:
+                action_text = self.translator.tr('blocked')
+            # 4. Стандартные маппинги для других действий
             else:
-                action = event.get('action', 'unknown')
                 action_text = {
-                    'alert': 'Логирование',
-                    'drop': 'Блокировка',
-                    'reject': 'Отклонение',
-                    'allowed': 'Разрешено',
-                    'unknown': 'Неизвестно'
+                    'alert': self.translator.tr('logging'),
+                    'reject': self.translator.tr('rejected'),
+                    'allowed': self.translator.tr('allowed'),
+                    'unknown': self.translator.tr('unknown')
                 }.get(action, action)
-            
-            # Для наших блокировок гарантируем "Блокировка"
-            if 'signature' in event and "GUI Blocked" in event['signature']:
-                action_text = 'Блокировка'
-            
+
             self.alerts_table.setItem(i, 7, QTableWidgetItem(action_text))
-            
+
             # Детали в зависимости от типа события
             details = ""
             if event['event_type'] == 'dns':
-                details = f"Запрос: {event.get('query', '')}\nОтвет: {event.get('response', '')}"
+                details = f"{self.translator.tr('dns_query')} {event.get('query', '')}\n{self.translator.tr('dns_response')} {event.get('response', '')}"
             elif event['event_type'] == 'tls':
-                details = f"SNI: {event.get('sni', '')}\nИздатель: {event.get('issuer', '')}"
+                details = f"{self.translator.tr('tls_sni')} {event.get('sni', '')}\n{self.translator.tr('tls_issuer')} {event.get('issuer', '')}"
             elif event['event_type'] == 'flow':
-                details = f"Состояние: {event.get('state', '')}\nПричина: {event.get('reason', '')}"
+                details = f"{self.translator.tr('flow_state')} {event.get('state', '')}\n{self.translator.tr('flow_reason')} {event.get('reason', '')}"
             else:
-                details = event.get('category', '')
-                
+                details = f"{self.translator.tr('category')} {event.get('category', '')}"
+
             self.alerts_table.setItem(i, 8, QTableWidgetItem(details))
-            
+
             # Раскраска
             self.color_event_row(i, event)
-        
+
         # Автоматическая подгонка ширины колонок
         self.resize_columns_to_content(self.alerts_table)
     
@@ -2154,7 +2464,7 @@ class MainWindow(QMainWindow):
     def show_rule_by_sid(self, sid):
         """Находит и показывает правило по SID"""
         if not sid:
-            QMessageBox.warning(self, "Ошибка", "SID правила не указан")
+            QMessageBox.warning(self, self.translator.tr('error'), self.translator.tr('sid_not_specified'))
             return
             
         found_rule = None
@@ -2167,14 +2477,14 @@ class MainWindow(QMainWindow):
                 return
             if found_rule:
                 break
-    
+
         
         if found_rule:
             # Показываем диалог с правилом
             self.show_rule_details_for_rule(found_rule)
         else:
-            QMessageBox.information(self, "Правило не найдено", 
-                                   f"Правило с SID {sid} не найдено в текущих правилах")
+            QMessageBox.information(self, self.translator.tr('rule_not_found'), 
+                                   self.translator.tr('rule_not_found_message').format(sid))
             
     def show_rule_details_for_rule(self, rule):
         """Показывает диалог с деталями правила"""
@@ -2209,7 +2519,7 @@ class MainWindow(QMainWindow):
         event = self.current_events[row]
         
         dialog = QDialog(self)
-        dialog.setWindowTitle("Детали события")
+        dialog.setWindowTitle(self.translator.tr('event_details'))
         dialog.setGeometry(300, 300, 700, 700)  # Немного увеличили высоту
         
         # Основной макет
@@ -2237,35 +2547,35 @@ class MainWindow(QMainWindow):
                 return line_edit
         
         # Основные поля события
-        form_layout.addRow("Время:", create_readonly_field(event['timestamp']))
-        form_layout.addRow("Тип события:", create_readonly_field(event['event_type']))
-        form_layout.addRow("Источник:", create_readonly_field(event['src_ip']))
-        form_layout.addRow("Назначение:", create_readonly_field(event['dest_ip']))
-        form_layout.addRow("Протокол:", create_readonly_field(event['proto']))
-        form_layout.addRow("Важность:", create_readonly_field(str(event.get('severity', 0))))
+        form_layout.addRow(self.translator.tr('time'), create_readonly_field(event['timestamp']))
+        form_layout.addRow(self.translator.tr('event_type'), create_readonly_field(event['event_type']))
+        form_layout.addRow(self.translator.tr('source'), create_readonly_field(event['src_ip']))
+        form_layout.addRow(self.translator.tr('destination'), create_readonly_field(event['dest_ip']))
+        form_layout.addRow(self.translator.tr('protocol'), create_readonly_field(event['proto']))
+        form_layout.addRow(self.translator.tr('severity'), create_readonly_field(str(event.get('severity', 0))))
         
         # Действие - всегда отображаем реальное действие
         if event.get('blocked', False):
-            action_text = "Блокировка"
+            action_text = self.translator.tr('blocked')
         else:
             action = event.get('action', 'unknown')
             action_text = {
-                'alert': 'Логирование',
-                'drop': 'Блокировка',
-                'reject': 'Отклонение',
-                'allowed': 'Разрешено',
-                'unknown': 'Неизвестно'
+                'alert': self.translator.tr('logging'),
+                'drop': self.translator.tr('blocked'),
+                'reject': self.translator.tr('rejected'),
+                'allowed': self.translator.tr('allowed'),
+                'unknown': self.translator.tr('unknown')
             }.get(action, action)
         
-        form_layout.addRow("Действие:", create_readonly_field(action_text))
+        form_layout.addRow(self.translator.tr('action'), create_readonly_field(action_text))
 
         # Группа для основной информации
-        main_info_group = QGroupBox("Основная информация")
+        main_info_group = QGroupBox(self.translator.tr('main_info'))
         main_info_group.setLayout(form_layout)
         content_layout.addWidget(main_info_group)
         
         # === Сырые данные ===
-        raw_group = QGroupBox("Сырые данные")
+        raw_group = QGroupBox(self.translator.tr('raw_data'))
         raw_layout = QVBoxLayout()
         
         raw_data = QTextEdit()
@@ -2284,10 +2594,10 @@ class MainWindow(QMainWindow):
             # Если не удалось разобрать как JSON, показываем как есть
             raw_data.setPlainText(event.get('raw', 'N/A'))
         
-        raw_layout.addWidget(QLabel("Сырые данные:"))
+        raw_layout.addWidget(QLabel(self.translator.tr('raw_data') + ":"))
         raw_layout.addWidget(raw_data)
         
-        copy_raw_btn = QPushButton("Копировать сырые данные")
+        copy_raw_btn = QPushButton(self.translator.tr('copy_raw_data'))
         copy_raw_btn.clicked.connect(lambda: QApplication.clipboard().setText(event.get('raw', '')))
         raw_layout.addWidget(copy_raw_btn)
         
@@ -2300,7 +2610,7 @@ class MainWindow(QMainWindow):
             content_layout.addWidget(rule_info)
         
         # === Действия ===
-        actions_group = QGroupBox("Действия")
+        actions_group = QGroupBox(self.translator.tr('actions'))
         actions_layout = QVBoxLayout()
         
         # Блок блокировки IP
@@ -2316,23 +2626,23 @@ class MainWindow(QMainWindow):
         
         # Кнопка блокировки источника
         if not src_is_local and event['src_ip'] != 'N/A':
-            block_src_btn = QPushButton(f"Блокировать источник: {event['src_ip']}")
+            block_src_btn = QPushButton(f"{self.translator.tr('block_source')} {event['src_ip']}")
             block_src_btn.clicked.connect(lambda: self.block_alert_ip(event['src_ip'], dialog))
             ip_actions_layout.addWidget(block_src_btn)
         
         # Кнопка блокировки назначения
         if not dst_is_local and event['dest_ip'] != 'N/A':
-            block_dst_btn = QPushButton(f"Блокировать назначение: {event['dest_ip']}")
+            block_dst_btn = QPushButton(f"{self.translator.tr('block_destination')} {event['dest_ip']}")
             block_dst_btn.clicked.connect(lambda: self.block_alert_ip(event['dest_ip'], dialog))
             ip_actions_layout.addWidget(block_dst_btn)
         
         # Если оба IP локальные (внутренняя сеть), предлагаем оба варианта
         if src_is_local and dst_is_local:
-            block_src_btn = QPushButton(f"Блокировать источник: {event['src_ip']}")
+            block_src_btn = QPushButton(f"{self.translator.tr('block_source')} {event['src_ip']}")
             block_src_btn.clicked.connect(lambda: self.block_alert_ip(event['src_ip'], dialog))
             ip_actions_layout.addWidget(block_src_btn)
             
-            block_dst_btn = QPushButton(f"Блокировать назначение: {event['dest_ip']}")
+            block_dst_btn = QPushButton(f"{self.translator.tr('block_destination')} {event['dest_ip']}")
             block_dst_btn.clicked.connect(lambda: self.block_alert_ip(event['dest_ip'], dialog))
             ip_actions_layout.addWidget(block_dst_btn)
         
@@ -2341,7 +2651,7 @@ class MainWindow(QMainWindow):
             actions_layout.addLayout(ip_actions_layout)
         
         # Кнопка закрытия
-        close_btn = QPushButton("Закрыть")
+        close_btn = QPushButton(self.translator.tr('close'))
         close_btn.clicked.connect(dialog.accept)
         actions_layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
         
@@ -2365,41 +2675,41 @@ class MainWindow(QMainWindow):
         
     def create_rule_info_widget(self, event, dialog):
         """Создает компактный виджет с информацией о правиле"""
-        rule_group = QGroupBox("Информация о правиле")
-        rule_layout = QGridLayout()  # Используем сетку для компактного размещения
-        rule_layout.setVerticalSpacing(5)  # Уменьшаем вертикальные отступы
-        
-        # Заголовки и значения в сетке
-        rule_layout.addWidget(QLabel("Файл:"), 0, 0)
+        rule_group = QGroupBox(self.translator.tr('rule_info'))
+        rule_layout = QGridLayout()
+        rule_layout.setVerticalSpacing(5)
+
+        rule_layout.addWidget(QLabel(self.translator.tr('rule_file')), 0, 0)
         file_label = QLabel(event.get('rule_file', 'N/A'))
         file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         rule_layout.addWidget(file_label, 0, 1)
-        
-        rule_layout.addWidget(QLabel("SID:"), 1, 0)
+
+        rule_layout.addWidget(QLabel(self.translator.tr('rule_sid')), 1, 0)
         sid_label = QLabel(str(event.get('sid', 'N/A')))
         sid_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         rule_layout.addWidget(sid_label, 1, 1)
-        
-        rule_layout.addWidget(QLabel("Название:"), 2, 0, 1, 2)  # Занимает 2 колонки
+
+        rule_layout.addWidget(QLabel(self.translator.tr('rule_name')), 2, 0, 1, 2)
         name_label = QLabel(event.get('signature', 'N/A'))
         name_label.setWordWrap(True)
         name_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         rule_layout.addWidget(name_label, 3, 0, 1, 2)
-        
+
         # Кнопки в отдельной строке
         btn_layout = QHBoxLayout()
-        
+
         if event.get('sid'):
-            view_btn = QPushButton("Просмотреть")
+            view_btn = QPushButton(self.translator.tr('view_rule'))
             view_btn.clicked.connect(lambda: self.show_rule_by_sid(event.get('sid')))
             btn_layout.addWidget(view_btn)
-            
-            disable_btn = QPushButton("Отключить")
+
+            # Добавляем кнопку "Отключить"
+            disable_btn = QPushButton(self.translator.tr('disable_rule'))
             disable_btn.clicked.connect(lambda: self.disable_rule_by_sid(event.get('sid'), dialog))
             btn_layout.addWidget(disable_btn)
-        
+
         rule_layout.addLayout(btn_layout, 4, 0, 1, 2)
-        
+
         rule_group.setLayout(rule_layout)
         return rule_group
       
@@ -2420,38 +2730,39 @@ class MainWindow(QMainWindow):
 
 
     def disable_rule_by_sid(self, sid, dialog):
-        """Отключает правило по SID из диалога события"""
+        """Отключает правило по SID из диалога события с проверкой прав"""
         try:
             if sid is None:
-                QMessageBox.warning(dialog, "Ошибка", "SID правила не указан")
+                QMessageBox.warning(dialog, self.translator.tr('error'), self.translator.tr('sid_not_specified'))
                 return
-                
-            if self.suricata.toggle_rule_by_sid(sid, False):
-                # Обновляем событие, если оно отображается
+
+            if self.suricata.safe_toggle_rule_by_sid(sid, False):
                 for event in self.current_events:
                     if event.get('sid') == sid:
                         event['action'] = 'disabled'
                         event['enabled'] = False
                         break
-                
+
                 QMessageBox.information(
-                    dialog, 
-                    "Правило отключено", 
-                    f"Правило SID {sid} отключено.\nНе забудьте перезапустить Suricata для применения изменений."
+                    dialog,
+                    self.translator.tr('rule_apply_success'),
+                    f"{self.translator.tr('rule_disabled_success')} для SID {sid}\n{self.translator.tr('rule_restart_reminder')}"
                 )
+                dialog.accept()
             else:
                 QMessageBox.critical(
-                    dialog, 
-                    "Ошибка", 
-                    f"Не удалось отключить правило SID {sid}"
+                    dialog,
+                    self.translator.tr('rule_apply_error'),
+                    f"{self.translator.tr('failed_disable_rule').format(sid)}\n\n{self.translator.tr('check_admin_rights')}"
                 )
         except Exception as e:
             logging.error(f"Ошибка отключения правила: {str(e)}\n{traceback.format_exc()}")
             QMessageBox.critical(
-                dialog, 
-                "Критическая ошибка", 
+                dialog,
+                self.translator.tr('critical_error'),
                 f"Ошибка отключения правила: {str(e)}"
             )
+
     
     def apply_rule_action(self, sid, action, dialog):
         """Применяет выбранное действие к правилу"""
@@ -2461,15 +2772,13 @@ class MainWindow(QMainWindow):
             
             if action == "disable":
                 success = self.suricata.toggle_rule_by_sid(sid, False)
-                message = "Правило отключено"
+                message = self.translator.tr('rule_disabled_success')
             elif action in ["alert", "drop", "reject"]:
-                # Сначала включаем правило (если было отключено)
                 self.suricata.toggle_rule_by_sid(sid, True)
                 success = self.suricata.change_rule_action(sid, action)
-                message = f"Действие правила изменено на '{action}'"
+                message = self.translator.tr('rule_action_changed').format(action)
             
             if success:
-                # Обновляем статус в текущих событиях
                 for evt in self.current_events:
                     if evt.get('sid') == sid:
                         if action == "disable":
@@ -2481,20 +2790,20 @@ class MainWindow(QMainWindow):
                 
                 QMessageBox.information(
                     dialog,
-                    "Успех",
-                    f"{message} для SID {sid}\n\nНе забудьте перезапустить Suricata для применения изменений."
+                    self.translator.tr('rule_apply_success'),
+                    f"{message} для SID {sid}\n\n{self.translator.tr('rule_restart_reminder')}"
                 )
             else:
                 QMessageBox.critical(
                     dialog,
-                    "Ошибка",
-                    f"Не удалось применить действие к правилу SID {sid}"
+                    self.translator.tr('rule_apply_error'),
+                    self.translator.tr('failed_apply_action').format(sid)
                 )
         except Exception as e:
             logging.error(f"Ошибка применения действия: {str(e)}\n{traceback.format_exc()}")
             QMessageBox.critical(
                 dialog,
-                "Ошибка",
+                self.translator.tr('rule_apply_error'),
                 f"Ошибка применения действия: {str(e)}"
             )
     
@@ -2513,29 +2822,29 @@ class MainWindow(QMainWindow):
                 if self.suricata.restart_suricata():
                     QMessageBox.information(
                         dialog, 
-                        "IP заблокирован", 
-                        f"IP {ip} заблокирован и Suricata перезапущен"
+                        self.translator.tr('ip_blocked'), 
+                        self.translator.tr('ip_blocked_message').format(ip)
                     )
                     logging.info(f"Заблокирован IP: {ip}")
                     dialog.accept()
                 else:
                     QMessageBox.warning(
                         dialog, 
-                        "Ошибка", 
-                        f"IP {ip} добавлен в правила, но не удалось перезапустить Suricata"
+                        self.translator.tr('error'), 
+                        self.translator.tr('warning_restart_failed').format(ip)
                     )
             else:
                 QMessageBox.critical(
                     dialog, 
-                    "Ошибка", 
-                    f"Не удалось добавить правило блокировки для IP {ip}"
+                    self.translator.tr('error'), 
+                    self.translator.tr('error_adding_rule').format(ip)
                 )
         except Exception as e:
             logging.error(f"Ошибка блокировки IP: {str(e)}\n{traceback.format_exc()}")
             QMessageBox.critical(
                 dialog, 
-                "Ошибка", 
-                f"Ошибка блокировки IP: {str(e)}"
+                self.translator.tr('error'), 
+                f"{self.translator.tr('error_blocking_ip')}: {str(e)}"
             )
     
 
@@ -2549,13 +2858,13 @@ class MainWindow(QMainWindow):
         try:
             if self.suricata.start_suricata():
                 logging.info("Suricata запущена")
-                QMessageBox.information(self, "Успех", "Suricata успешно запущена")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('suricata_started_successfully'))
                 self.update_status()
             else:
-                QMessageBox.critical(self, "Ошибка", "Ошибка запуска Suricata")
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_starting_suricata'))
         except Exception as e:
             logging.error(f"Ошибка запуска Suricata: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка запуска Suricata: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_starting_suricata')}: {str(e)}")
     
     def stop_suricata(self):
         """Останавливает Suricata"""
@@ -2566,13 +2875,13 @@ class MainWindow(QMainWindow):
         try:
             if self.suricata.stop_suricata():
                 logging.info("Suricata остановлена")
-                QMessageBox.information(self, "Успех", "Suricata успешно остановлена")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('suricata_stopped_successfully'))
                 self.update_status()
             else:
-                QMessageBox.critical(self, "Ошибка", "Ошибка остановки Suricata")
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_stopping_suricata'))
         except Exception as e:
             logging.error(f"Ошибка остановки Suricata: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка остановки Suricata: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_stopping_suricata')}: {str(e)}")
     
     def restart_suricata(self):
         """Перезапускает Suricata"""
@@ -2583,13 +2892,13 @@ class MainWindow(QMainWindow):
         try:
             if self.suricata.restart_suricata():
                 logging.info("Suricata перезапущена")
-                QMessageBox.information(self, "Успех", "Suricata успешно перезапущена")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('suricata_restarted_successfully'))
                 self.update_status()
             else:
-                QMessageBox.critical(self, "Ошибка", "Ошибка перезапуска Suricata")
+                QMessageBox.critical(self, self.translator.tr('error'), self.translator.tr('error_restarting_suricata'))
         except Exception as e:
             logging.error(f"Ошибка перезапуска Suricata: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка перезапуска Suricata: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_restarting_suricata')}: {str(e)}")
             
 
 class RuleSources:
@@ -2684,52 +2993,53 @@ class RuleSources:
             del self.sources[index]
             return self.save_sources()
         return False
-    
+
     def download_and_extract(self, url, dest_dir):
-        """Скачивает и распаковывает правила из URL, возвращает список путей к файлам"""
-        # Создаем временный файл
+        """Скачивает и распаковывает правила из URL, возвращает список метаданных файлов"""
         temp_file = tempfile.mktemp()
         extracted_files = []
-        
+
         try:
-            # Скачиваем файл с таймаутом
+            # Скачиваем файл
             try:
                 with urllib.request.urlopen(url, timeout=30) as response, open(temp_file, 'wb') as out_file:
                     shutil.copyfileobj(response, out_file)
             except Exception as e:
                 raise ConnectionError(f"Ошибка скачивания: {str(e)}")
-            
-            # Определяем тип файла по расширению
+
+            # Определяем тип и извлекаем
             if url.endswith('.tar.gz') or url.endswith('.tgz'):
-                # Распаковываем tar.gz
                 with tarfile.open(temp_file, "r:gz") as tar:
                     self._extract_rules(tar, dest_dir)
-                    
             elif url.endswith('.zip'):
-                # Распаковываем zip
                 with zipfile.ZipFile(temp_file, 'r') as zip_ref:
                     self._extract_rules(zip_ref, dest_dir)
-                    
             elif url.endswith('.rules'):
-                # Просто копируем файл правил
                 dest_path = os.path.join(dest_dir, os.path.basename(url))
                 shutil.copy(temp_file, dest_path)
-                
             else:
                 raise ValueError(f"Неподдерживаемый формат файла: {url}")
-            
-            # Собираем список всех файлов .rules в целевой директории
+
+            # Собираем .rules файлы и их хеши
             for root, _, files in os.walk(dest_dir):
                 for file in files:
                     if file.endswith('.rules'):
-                        extracted_files.append(os.path.join(root, file))
-            
+                        full_path = os.path.join(root, file)
+                        file_hash = calculate_file_hash(full_path)
+                        if file_hash:
+                            extracted_files.append({
+                                'filename': file,
+                                'path': full_path,
+                                'hash': file_hash,
+                                'url': url
+                            })
+
             return extracted_files
+
         except Exception as e:
             logging.error(f"Ошибка обработки {url}: {str(e)}")
             return []
         finally:
-            # Всегда удаляем временный файл
             if os.path.exists(temp_file):
                 os.remove(temp_file)
     

@@ -14,25 +14,26 @@ import logging
 class RuleDialog(QDialog):
     """Диалог для просмотра и редактирования правила"""
     
-    def __init__(self, rule_data, manager, parent=None):
+    def __init__(self, rule_data, manager, parent=None, translator=None):
         super().__init__(parent)
-        self.setWindowTitle("Детали правила")
+        self.translator = translator
+        self.setWindowTitle(self.translator.tr('rule_dialog_title'))
         self.setGeometry(300, 300, 600, 400)
         
         # Проверяем наличие обязательных полей
         if 'raw' not in rule_data:
-            rule_data['raw'] = "No rule content"
+            rule_data['raw'] = self.translator.tr('no_rule_content')
         if 'sid' not in rule_data:
             rule_data['sid'] = "N/A"
         if 'msg' not in rule_data:
-            rule_data['msg'] = "No message"
+            rule_data['msg'] = self.translator.tr('no_message')
         if 'file' not in rule_data:
-            rule_data['file'] = "Unknown file"
+            rule_data['file'] = self.translator.tr('unknown_file')
         if 'enabled' not in rule_data:
             rule_data['enabled'] = True
             
         self.rule_data = rule_data
-        self.manager = manager  # Добавляем ссылку на SuricataManager
+        self.manager = manager
         
         # Проверяем, есть ли файл в конфиге
         self.check_file_in_config(rule_data['file'])
@@ -42,24 +43,24 @@ class RuleDialog(QDialog):
         # Форма с деталями правила
         form_layout = QFormLayout()
         
-        self.enabled_check = QCheckBox("Активно")
+        self.enabled_check = QCheckBox(self.translator.tr('rule_active'))
         self.enabled_check.setChecked(rule_data['enabled'])
-        form_layout.addRow("Статус:", self.enabled_check)
+        form_layout.addRow(self.translator.tr('rule_status'), self.enabled_check)
         
         self.sid_edit = QLineEdit(rule_data['sid'])
         self.sid_edit.setReadOnly(True)
-        form_layout.addRow("SID:", self.sid_edit)
+        form_layout.addRow(self.translator.tr('rule_sid'), self.sid_edit)
         
         self.msg_edit = QLineEdit(rule_data['msg'])
-        form_layout.addRow("Сообщение:", self.msg_edit)
+        form_layout.addRow(self.translator.tr('rule_message'), self.msg_edit)
         
         self.file_edit = QLineEdit(rule_data['file'])
         self.file_edit.setReadOnly(True)
-        form_layout.addRow("Файл:", self.file_edit)
+        form_layout.addRow(self.translator.tr('rule_file'), self.file_edit)
         
         # Добавляем выбор действия
         action_layout = QHBoxLayout()
-        action_layout.addWidget(QLabel("Действие:"))
+        action_layout.addWidget(QLabel(self.translator.tr('rule_action') + ":"))
         
         self.action_combo = QComboBox()
         self.action_combo.addItems(["alert", "drop", "reject", "pass"])
@@ -67,14 +68,14 @@ class RuleDialog(QDialog):
         self.action_combo.setCurrentText(current_action)
         
         action_layout.addWidget(self.action_combo)
-        action_layout.addStretch()  # добавляем растяжку справа
+        action_layout.addStretch()
         
         form_layout.addRow(action_layout)
         
         # Поле для редактирования сырого правила
         self.rule_edit = QTextEdit()
         self.rule_edit.setPlainText(rule_data['raw'])
-        form_layout.addRow("Правило:", self.rule_edit)
+        form_layout.addRow(self.translator.tr('rule_raw'), self.rule_edit)
         
         layout.addLayout(form_layout)
         
@@ -106,24 +107,22 @@ class RuleDialog(QDialog):
         if not self.manager.is_rule_file_in_config(filename):
             reply = QMessageBox.question(
                 self,
-                "Файл не в конфигурации",
-                f"Файл правил '{filename}' не включен в конфигурацию Suricata.\n"
-                "Хотите добавить его сейчас?",
+                self.translator.tr('file_not_in_config'),
+                self.translator.tr('file_not_in_config_message').format(filename),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 if self.manager.add_rule_file_to_config(filename):
                     QMessageBox.information(
                         self, 
-                        "Успех", 
-                        f"Файл '{filename}' добавлен в конфигурацию.\n"
-                        "Не забудьте перезапустить Suricata для применения изменений."
+                        self.translator.tr('success'), 
+                        self.translator.tr('file_added_success').format(filename)
                     )
                 else:
                     QMessageBox.warning(
                         self, 
-                        "Ошибка", 
-                        f"Не удалось добавить файл '{filename}' в конфигурацию."
+                        self.translator.tr('error'), 
+                        self.translator.tr('error_adding_file').format(filename)
                     )
     
     def apply_changes(self):
@@ -163,9 +162,9 @@ class RuleDialog(QDialog):
                     # Заменяем правило
                     if self.manager.replace_rule(self.rule_data, updated_data):
                         self.rule_data.update(updated_data)
-                        QMessageBox.information(self, "Успех", "Действие правила успешно изменено!")
+                        QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('action_updated'))
                     else:
-                        QMessageBox.warning(self, "Ошибка", "Не удалось изменить действие правила")
+                        QMessageBox.warning(self, self.translator.tr('error'), self.translator.tr('error_changing_action'))
                 return
     
             # Если изменился только статус
@@ -173,9 +172,9 @@ class RuleDialog(QDialog):
                 # Используем метод toggle_rule
                 if self.manager.toggle_rule(self.rule_data, new_enabled):
                     self.rule_data['enabled'] = new_enabled
-                    QMessageBox.information(self, "Успех", "Статус правила обновлен!")
+                    QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('status_updated'))
                 else:
-                    QMessageBox.warning(self, "Ошибка", "Не удалось изменить статус правила")
+                    QMessageBox.warning(self, self.translator.tr('error'), self.translator.tr('error_changing_status'))
                 return
     
             # Если изменилось само правило
@@ -193,7 +192,7 @@ class RuleDialog(QDialog):
             updated_data['sid'] = sid_match.group(1) if sid_match and sid_match.group(1) else "N/A"
     
             msg_match = re.search(r'msg:"([^"]+)"', working_line)
-            updated_data['msg'] = msg_match.group(1) if msg_match and msg_match.group(1) else "No message"
+            updated_data['msg'] = msg_match.group(1) if msg_match and msg_match.group(1) else self.translator.tr('no_message')
     
             # Заменяем правило целиком
             if self.manager.replace_rule(self.rule_data, updated_data):
@@ -204,13 +203,13 @@ class RuleDialog(QDialog):
                 self.sid_edit.setText(updated_data['sid'])
                 self.msg_edit.setText(updated_data['msg'])
     
-                QMessageBox.information(self, "Успех", "Правило полностью обновлено!")
+                QMessageBox.information(self, self.translator.tr('success'), self.translator.tr('rule_updated'))
             else:
-                QMessageBox.warning(self, "Ошибка", "Не удалось обновить правило")
+                QMessageBox.warning(self, self.translator.tr('error'), self.translator.tr('error_updating_rule'))
     
         except Exception as e:
             logging.error(f"Ошибка применения изменений: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка применения изменений: {str(e)}")
+            QMessageBox.critical(self, self.translator.tr('error'), f"{self.translator.tr('error_applying_changes')}: {str(e)}")
     
     def accept(self):
         """Применяет изменения и закрывает диалог"""
@@ -221,24 +220,25 @@ class RuleDialog(QDialog):
 class ServiceDialog(QDialog):
     """Диалог для настройки службы Suricata"""
     
-    def __init__(self, service_name, parent=None):
+    def __init__(self, service_name, parent=None, translator=None):
         super().__init__(parent)
-        self.setWindowTitle("Настройка службы Suricata")
+        self.translator = translator
+        self.setWindowTitle(self.translator.tr('service_configuration'))
         self.setGeometry(300, 300, 400, 200)
         
         layout = QVBoxLayout()
         
         self.service_edit = QLineEdit(service_name)
-        self.status_label = QLabel("Статус: Проверка...")
+        self.status_label = QLabel(f"{self.translator.tr('status')}: {self.translator.tr('checking')}")
         
-        self.test_btn = QPushButton("Проверить службу")
+        self.test_btn = QPushButton(self.translator.tr('test_service'))
         self.test_btn.clicked.connect(self.test_service)
         
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         
-        layout.addWidget(QLabel("Имя службы:"))
+        layout.addWidget(QLabel(self.translator.tr('service_name') + ":"))
         layout.addWidget(self.service_edit)
         layout.addWidget(self.status_label)
         layout.addWidget(self.test_btn)
@@ -251,19 +251,22 @@ class ServiceDialog(QDialog):
         """Проверяет доступность службы"""
         service_name = self.service_edit.text().strip()
         if not service_name:
-            self.status_label.setText("Статус: Введите имя службы")
+            self.status_label.setText(f"{self.translator.tr('status')}: {self.translator.tr('enter_service_name')}")
             return
             
         try:
             # Проверка существования службы
             try:
                 status = win32serviceutil.QueryServiceStatus(service_name)
-                status_text = "ЗАПУЩЕНА" if status[1] == win32service.SERVICE_RUNNING else "ОСТАНОВЛЕНА"
-                self.status_label.setText(f"Статус: Служба существует ({status_text})")
+                if status[1] == win32service.SERVICE_RUNNING:
+                    status_text = self.translator.tr('service_exists_running')
+                else:
+                    status_text = self.translator.tr('service_exists_stopped')
+                self.status_label.setText(f"{self.translator.tr('status')}: {status_text}")
             except pywintypes.error as e:
                 if e.winerror == 1060:  # Служба не найдена
-                    self.status_label.setText("Статус: Служба не найдена")
+                    self.status_label.setText(f"{self.translator.tr('status')}: {self.translator.tr('service_not_found')}")
                 else:
-                    self.status_label.setText(f"Статус: Ошибка - {e.strerror}")
+                    self.status_label.setText(f"{self.translator.tr('status')}: {self.translator.tr('service_error').format(e.strerror)}")
         except Exception as e:
-            self.status_label.setText(f"Статус: Ошибка - {str(e)}")
+            self.status_label.setText(f"{self.translator.tr('status')}: {self.translator.tr('service_error').format(str(e))}")
