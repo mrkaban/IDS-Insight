@@ -1,4 +1,4 @@
 # IDS-Insight
-Графический интерфейс к IDS Suricata на Windows
+Graphical interface to IDS Suricata on Windows
 
-Официальный сайт: [https://alekseycheremnykh.ru/](https://alekseycheremnykh.ru/post/ids-insight/)
+Official website: [https://alekseycheremnykh.ru/](https://alekseycheremnykh.ru/post/ids-insight/)
